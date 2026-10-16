@@ -1,0 +1,26 @@
+[Unit]
+Description=Paint price monitoring Telegram bot
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=paintbot
+Group=paintbot
+WorkingDirectory=/opt/paintbot
+EnvironmentFile=/opt/paintbot/.env
+ExecStart=/opt/paintbot/.venv/bin/python -m paintbot
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=40
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/paintbot/var
+
+[Install]
+WantedBy=multi-user.target

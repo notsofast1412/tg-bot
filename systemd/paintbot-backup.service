@@ -1,0 +1,15 @@
+[Unit]
+Description=Consistent online backup of Paint Monitor SQLite
+
+[Service]
+Type=oneshot
+User=paintbot
+Group=paintbot
+WorkingDirectory=/opt/paintbot
+EnvironmentFile=/opt/paintbot/.env
+ExecStart=/bin/bash /opt/paintbot/scripts/backup.sh
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/paintbot/var
