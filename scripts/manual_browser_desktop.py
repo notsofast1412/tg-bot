@@ -3,6 +3,7 @@
 No Playwright, WebDriver, remote debugging, or automatic challenge interaction.
 Run as paintbot under xvfb-run. The browser keeps its normal sandbox enabled.
 """
+import argparse
 import json
 import os
 from pathlib import Path
@@ -12,7 +13,7 @@ import subprocess
 import threading
 
 
-def main():
+def main(direct=False):
     os.umask(0o077)
     root = Path('/opt/paintbot')
     password = root / 'var/vnc.pass'
@@ -44,14 +45,17 @@ def main():
             children.append(vnc)
             if stop.wait(1) or vnc.poll() is not None:
                 raise RuntimeError('VNC startup failed; inspect var/manual-browser-desktop.log')
+            proxy_options = [] if direct else [
+                '--proxy-server=http://' + metadata['proxy'] + ':3128']
             browser = subprocess.Popen([
                 str(chrome), '--user-data-dir=' + str(profile),
-                '--proxy-server=http://' + metadata['proxy'] + ':3128',
                 '--lang=ru-RU', '--no-first-run',
+                *proxy_options,
                 'https://www.ozon.ru/product/196525011/',
             ], stdout=log, stderr=log)
             children.append(browser)
             print('Direct Chromium launch. Connect through the existing SSH/VNC tunnel.', flush=True)
+            print('Network:', 'host routing (no explicit proxy)' if direct else 'configured VPN proxy', flush=True)
             print('Ctrl+C stops this desktop. Profile stays in var/manual-browser-profile.', flush=True)
             while not stop.wait(1):
                 if vnc.poll() is not None:
@@ -72,8 +76,12 @@ def main():
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--direct', action='store_true',
+                        help='Use host routing without the CONNECT proxy (for the timed full-VPN test)')
+    args = parser.parse_args()
     try:
-        main()
+        main(args.direct)
     except Exception as exc:
         print(type(exc).__name__ + ': ' + str(exc)[:1200])
         raise SystemExit(1)
