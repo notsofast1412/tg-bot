@@ -2,6 +2,7 @@
 
 Run using an isolated environment with playwright installed, from /opt/paintbot.
 """
+import argparse
 import asyncio
 import json
 import os
@@ -11,7 +12,7 @@ from urllib.parse import urlsplit
 from playwright.async_api import async_playwright, TimeoutError as BrowserTimeout
 
 
-async def main():
+async def main(full_chromium=False):
     os.umask(0o077)
     metadata = json.loads(Path('/etc/paintbot-ru-proxy.json').read_text())
     proxy = 'http://' + metadata['proxy'] + ':3128'
@@ -19,8 +20,10 @@ async def main():
     output.mkdir(parents=True, exist_ok=True, mode=0o700)
     failed_hosts = set()
     async with async_playwright() as p:
+        options = {'channel': 'chromium'} if full_chromium else {}
+        print('Браузер:', 'Chromium (полная сборка)' if full_chromium else 'Chromium Headless Shell')
         browser = await p.chromium.launch(
-            headless=True, chromium_sandbox=True, proxy={'server': proxy})
+            headless=True, chromium_sandbox=True, proxy={'server': proxy}, **options)
         try:
             context = await browser.new_context(locale='ru-RU')
             page = await context.new_page()
@@ -49,8 +52,12 @@ async def main():
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--full-chromium', action='store_true',
+                        help='Use the full Chromium build in its standard headless mode')
+    args = parser.parse_args()
     try:
-        asyncio.run(main())
+        asyncio.run(main(args.full_chromium))
     except Exception as exc:
         # Browser failures may contain process logs, but this script never loads secrets.
         print(type(exc).__name__ + ': ' + str(exc)[:2500])
