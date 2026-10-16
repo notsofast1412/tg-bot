@@ -34,6 +34,14 @@ def test_profile_becomes_setconf_without_routes_dns_hooks_or_ipv6_default():
         assert unsupported not in result["wg_config"]
 
 
+@pytest.mark.parametrize("host", ["cdn2.ozone.ru", "st.ozone.ru"])
+def test_browser_resources_require_exact_allowed_host(host):
+    header = f"CONNECT {host}:443 HTTP/1.1\r\n\r\n".encode()
+    assert ru_vpn.connect_target(header, "10.0.0.1", "10.0.0.1") == host
+    malicious = f"CONNECT {host}.evil.com:443 HTTP/1.1\r\n\r\n".encode()
+    assert ru_vpn.connect_target(malicious, "10.0.0.1", "10.0.0.1") is None
+
+
 @pytest.mark.parametrize("old,new", [
     ("[Peer]", "PostUp = echo NEVER_EXECUTE\n\n[Peer]"),
     ("MTU = 1420", "Jc = 4\nMTU = 1420"),

@@ -23,7 +23,10 @@ PRIVATE = Path("/etc/paintbot-ru")
 PUBLIC = Path("/etc/netns/paintbot-ru")
 PROXY_META = Path("/etc/paintbot-ru-proxy.json")
 MARKER = Path("/run/paintbot-ru/owned")
-DOMAINS = frozenset(("card.wb.ru", "www.wildberries.ru", "ozon.ru", "www.ozon.ru"))
+DOMAINS = frozenset((
+    "card.wb.ru", "www.wildberries.ru", "ozon.ru", "www.ozon.ru",
+    "cdn2.ozone.ru", "st.ozone.ru",
+))
 
 
 class SetupError(ValueError):
