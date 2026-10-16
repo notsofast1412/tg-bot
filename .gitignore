@@ -1,4 +1,5 @@
 .venv/
+.browser-probe/
 .env
 *.db
 *.db-*
