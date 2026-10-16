@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from playwright.async_api import async_playwright, TimeoutError as BrowserTimeout
 
 
-async def main(full_chromium=False):
+async def main(full_chromium=False, headed=False):
     os.umask(0o077)
     metadata = json.loads(Path('/etc/paintbot-ru-proxy.json').read_text())
     proxy = 'http://' + metadata['proxy'] + ':3128'
@@ -22,8 +22,9 @@ async def main(full_chromium=False):
     async with async_playwright() as p:
         options = {'channel': 'chromium'} if full_chromium else {}
         print('Браузер:', 'Chromium (полная сборка)' if full_chromium else 'Chromium Headless Shell')
+        print('Режим:', 'с окном' if headed else 'headless')
         browser = await p.chromium.launch(
-            headless=True, chromium_sandbox=True, proxy={'server': proxy}, **options)
+            headless=not headed, chromium_sandbox=True, proxy={'server': proxy}, **options)
         try:
             context = await browser.new_context(locale='ru-RU')
             page = await context.new_page()
@@ -55,9 +56,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--full-chromium', action='store_true',
                         help='Use the full Chromium build in its standard headless mode')
+    parser.add_argument('--headed', action='store_true',
+                        help='Run with a window; requires an X server (e.g. xvfb-run)')
     args = parser.parse_args()
+    if args.headed and not args.full_chromium:
+        parser.error('--headed requires --full-chromium')
     try:
-        asyncio.run(main(args.full_chromium))
+        asyncio.run(main(args.full_chromium, args.headed))
     except Exception as exc:
         # Browser failures may contain process logs, but this script never loads secrets.
         print(type(exc).__name__ + ': ' + str(exc)[:2500])
