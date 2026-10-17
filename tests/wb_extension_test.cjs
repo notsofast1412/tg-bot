@@ -6,18 +6,25 @@ const url = 'https://www.wildberries.ru/catalog/518397236/detail.aspx?size=71657
 const source = 'https://www.wildberries.ru/__internal/u-card/cards/v4/detail';
 const product = {id: 518397236, name: 'Краска', totalQuantity: 52, token: 'PRIVATE', sizes: [
   {optionId: 716573024, price: {product: 26300, basic: 51600, wallet: 25500}, stocks: [{qty: 52}], payload: 'PRIVATE'}]};
-let listener, nextJob = {id: 'job', url, issued_at: Date.now() / 1000 - 0.1};
-let navigations = [], posts = [], timers = [];
+let listener, navigationListener, nextJob = {id: 'job', url, issued_at: Date.now() / 1000 - 0.1};
+let currentUrl = 'https://www.wildberries.ru/catalog/999/detail.aspx';
+let navigations = [], posts = [], timers = [], reloads = [], trace = [];
 const context = {URL, AbortSignal, TextDecoder, Uint8Array, atob, crypto: require('node:crypto').webcrypto,
   PAINTBOT_KEY: 'LOCAL_KEY', setInterval() {}, clearTimeout() {},
   setTimeout(fn) {timers.push(fn); return timers.length;},
-  chrome: {devtools: {inspectedWindow: {tabId: 7}, network: {onRequestFinished: {addListener(fn) {listener = fn;}}}},
-    tabs: {get: async () => ({url}), update: async (id, value) => {navigations.push([id, value]);}}},
+  chrome: {devtools: {inspectedWindow: {tabId: 7}, network: {
+    onRequestFinished: {addListener(fn) {listener = fn;}},
+    onNavigated: {addListener(fn) {navigationListener = fn;}}}},
+    tabs: {get: async () => ({url: currentUrl}),
+      update: async (id, value) => {navigations.push([id, value]); currentUrl = value.url;},
+      reload: async id => {reloads.push(id);}}},
   fetch: async (endpoint, options) => {
     assert(endpoint.startsWith('http://127.0.0.1:8765/'));
     assert.equal(options.headers.Authorization, 'Bearer LOCAL_KEY');
-    if (options.method === 'POST') posts.push(JSON.parse(options.body));
-    const job = nextJob; nextJob = null;
+    if (endpoint.endsWith('/result')) posts.push(JSON.parse(options.body));
+    if (endpoint.endsWith('/progress')) trace.push(JSON.parse(options.body));
+    const job = nextJob;
+    if (options.method === 'GET') nextJob = null;
     return {ok: true, json: async () => options.method === 'GET' ? {job} : {ok: true}};
   }};
 vm.createContext(context);
@@ -31,7 +38,10 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
   // A cancelled/replaced server job must not be silently claimed and lost.
   nextJob = {id: 'replacement-job', url, issued_at: Date.now() / 1000 - 0.01};
   await context.helpers.poll();
-  assert.equal(navigations.length, 2);
+  assert.equal(navigations.length, 1);
+  assert.equal(reloads.length, 1);
+  assert.equal(reloads[0], 7);
+  navigationListener(url);
   const clean = context.helpers.publicProduct({products: [product]}, '518397236');
   assert.equal(clean.sizes[0].price.product, 26300);
   assert(!JSON.stringify(clean).includes('PRIVATE'));
@@ -54,4 +64,9 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
   assert.equal(posts[0].products[0].sizes[0].price.product, 26300);
   assert(!JSON.stringify(posts).includes('PRIVATE'));
   assert(!JSON.stringify(posts).includes('LOCAL_KEY'));
+  assert(trace.some(e => e.event === 'navigation_requested'));
+  assert(trace.some(e => e.event === 'reload_requested'));
+  assert(trace.some(e => e.event === 'navigated'));
+  assert(trace.some(e => e.event === 'products_received'));
+  assert(!JSON.stringify(trace).includes('PRIVATE'));
 })().catch(error => {console.error(error); process.exitCode = 1;});

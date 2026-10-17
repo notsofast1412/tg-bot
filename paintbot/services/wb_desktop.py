@@ -25,6 +25,8 @@ class Broker:
         self.lock = asyncio.Lock()
         self.active = None
         self.last_poll = 0
+        self.extension_revision = None
+        self.trace = []
 
     async def fetch(self, url):
         ref = parse_link(url)
@@ -35,12 +37,14 @@ class Broker:
         if self.lock.locked():
             raise BridgeError('busy')
         async with self.lock:
+            self.trace = [{'event': 'queued'}]
             future = asyncio.get_running_loop().create_future()
             self.active = {'id': secrets.token_hex(16), 'url': url,
                            'issued_at': time.time(), 'future': future, 'session': None}
             try:
                 return await asyncio.wait_for(future, self.timeout)
             except asyncio.TimeoutError:
+                self.trace.append({'event': 'timeout'})
                 raise BridgeError('timeout') from None
             finally:
                 self.active = None
@@ -53,8 +57,28 @@ class Broker:
         self.last_poll = time.monotonic()
         if self.active and self.active['session'] is None:
             self.active['session'] = session
+            self.trace.append({'event': 'claimed'})
             return {k: self.active[k] for k in ('id', 'url', 'issued_at')}
         return None
+
+    def progress(self, report):
+        job = self.active
+        if (not isinstance(report, dict) or not job or report.get('job_id') != job['id']
+                or job['session'] is None or report.get('session') != job['session']):
+            raise BridgeError('invalid_result')
+        allowed = {'reload_requested', 'navigation_requested', 'navigation_failed', 'navigated',
+                   'document_response', 'api_response', 'other_cards_endpoint', 'cache_rejected',
+                   'body_unavailable', 'invalid_json', 'product_not_matched', 'products_received',
+                   'page_mismatch', 'result_failed', 'stale_response', 'too_many_products'}
+        if report.get('event') not in allowed:
+            raise BridgeError('invalid_result')
+        event = {'event': report['event']}
+        if type(report.get('status')) is int and 100 <= report['status'] <= 599:
+            event['status'] = report['status']
+        if len(self.trace) < 40:
+            self.trace.append(event)
+        if report['event'] == 'navigation_failed' and not job['future'].done():
+            job['future'].set_exception(BridgeError('navigation_failed'))
 
     def submit(self, result):
         job = self.active
@@ -96,6 +120,7 @@ class Broker:
         dest = result.get('dest')
         if not isinstance(dest, str) or not re.fullmatch(r'-?\d{1,12}', dest):
             dest = None
+        self.trace.append({'event': 'result_accepted'})
         job['future'].set_result({'schema': 1, 'url': ref.url, 'products': products, 'dest': dest})
 
 
@@ -111,7 +136,7 @@ def application(key, broker=None):
         extension_origin = re.fullmatch(r'chrome-extension://[a-p]{32}', origin)
         cors = {'Access-Control-Allow-Origin': origin, 'Vary': 'Origin'} if extension_origin else {}
         if request.method == 'OPTIONS':
-            if not extension_origin or request.path not in ('/fetch', '/job', '/result', '/health'):
+            if not extension_origin or request.path not in ('/fetch', '/job', '/result', '/health', '/progress'):
                 return web.Response(status=403)
             return web.Response(status=204, headers={**cors,
                 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -138,6 +163,10 @@ def application(key, broker=None):
         return web.json_response(await broker.fetch(payload['url']))
 
     async def claim(request):
+        revision = request.query.get('v', '')
+        if revision != '2':
+            return web.json_response({'job': None, 'reload_extension': True})
+        broker.extension_revision = 2
         return web.json_response({'job': broker.claim(request.query.get('session'))})
 
     async def submit(request):
@@ -146,12 +175,19 @@ def application(key, broker=None):
 
     async def health(request):
         return web.json_response({'extension_connected': time.monotonic() - broker.last_poll < 6,
-                                  'busy': broker.active is not None})
+                                  'busy': broker.active is not None,
+                                  'extension_revision': broker.extension_revision,
+                                  'trace': broker.trace})
+
+    async def progress(request):
+        broker.progress(await request.json())
+        return web.json_response({'ok': True})
 
     app.router.add_post('/fetch', fetch)
     app.router.add_get('/job', claim)
     app.router.add_post('/result', submit)
     app.router.add_get('/health', health)
+    app.router.add_post('/progress', progress)
     app.router.add_options('/{tail:.*}', health)
     return app
 

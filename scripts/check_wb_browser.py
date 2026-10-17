@@ -18,11 +18,15 @@ async def main():
         try:
             response = await client.get(ENDPOINT + '/health', headers={'Authorization': 'Bearer ' + key})
             connected = response.status_code == 200 and response.json().get('extension_connected') is True
+            revision = response.json().get('extension_revision')
         except (httpx.HTTPError, ValueError):
             raise SystemExit('Browser service unavailable; check paintbot-browser.service') from None
         print('Extension connected:', connected, flush=True)
+        print('Extension revision:', revision, flush=True)
         if not connected:
             raise SystemExit('Load the extension and keep DevTools open in the WB tab.')
+        if revision != 2:
+            raise SystemExit('Reload the updated extension, then close and reopen DevTools.')
     adapter = WildberriesAdapter(browser=True)
     try:
         ref = parse_link('https://www.wildberries.ru/catalog/518397236/detail.aspx?size=716573024')
@@ -32,6 +36,13 @@ async def main():
         if card.price is None:
             raise SystemExit(1)
     except MarketError as exc:
+        try:
+            async with httpx.AsyncClient(trust_env=False, follow_redirects=False, timeout=5) as client:
+                response = await client.get(ENDPOINT + '/health', headers={'Authorization': 'Bearer ' + key})
+                if response.status_code == 200:
+                    print('Browser trace:', json.dumps(response.json().get('trace', []), ensure_ascii=False), flush=True)
+        except (httpx.HTTPError, ValueError):
+            pass
         raise SystemExit(str(exc)) from None
     finally:
         await adapter.client.aclose()

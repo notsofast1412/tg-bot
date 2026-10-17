@@ -20,6 +20,12 @@ async function local(path, data) {
   return response.json();
 }
 
+async function progress(job, event, fields = {}) {
+  if (active !== job) return;
+  try { await local("/progress", {job_id: job.id, session, event, ...fields}); }
+  catch (_) { /* Diagnostics must not prevent price collection. */ }
+}
+
 function publicProduct(payload, nm) {
   const products = (payload?.data ?? payload)?.products;
   if (!Array.isArray(products)) return null;
@@ -53,11 +59,14 @@ async function send(job, extra) {
     const page = new URL(tab.url);
     const expected = new URL(job.url);
     if (page.origin !== expected.origin || page.pathname !== expected.pathname ||
-        page.searchParams.get("size") !== expected.searchParams.get("size")) return;
+        page.searchParams.get("size") !== expected.searchParams.get("size")) {
+      await progress(job, "page_mismatch");
+      return;
+    }
     await local("/result", {job_id: job.id, session, page_url: job.url, ...extra});
     if (active === job) active = null;
   } catch (_) {
-    // No request headers, cookies, exception strings or API bodies are logged.
+    await progress(job, "result_failed");
   } finally { sending = false; }
 }
 
@@ -65,36 +74,56 @@ chrome.devtools.network.onRequestFinished.addListener(entry => {
   const job = active;
   if (!job || sending || Date.now() / 1000 - job.issued_at > 75) return;
   const started = Date.parse(entry.startedDateTime) / 1000;
-  if (!Number.isFinite(started) || started < job.issued_at) return;
   let url;
   try { url = new URL(entry.request.url); } catch (_) { return; }
   const nm = new URL(job.url).pathname.split("/")[2];
   const status = entry.response.status;
   const base = {started_at: started, status};
-  if (url.origin + url.pathname === new URL(job.url).origin + new URL(job.url).pathname && status >= 400) {
-    void send(job, {...base, kind: "document"});
+  const document = url.origin + url.pathname === new URL(job.url).origin + new URL(job.url).pathname;
+  const api = url.origin + url.pathname === source;
+  if (!document && !api) {
+    if (["www.wildberries.ru", "wildberries.ru", "card.wb.ru"].includes(url.hostname) &&
+        url.pathname.includes("/cards/") && url.pathname.endsWith("/detail")) void progress(job, "other_cards_endpoint", {status});
     return;
   }
-  if (url.origin + url.pathname !== source || !(url.searchParams.get("nm") ?? "").split(";").includes(nm)) return;
+  if (!Number.isFinite(started) || started < job.issued_at) {
+    void progress(job, "stale_response", {status});
+    return;
+  }
+  if (document) {
+    void progress(job, "document_response", {status});
+    if (status >= 400) void send(job, {...base, kind: "document"});
+    return;
+  }
+  if (!(url.searchParams.get("nm") ?? "").split(";").includes(nm)) return;
+  void progress(job, "api_response", {status});
   if (status !== 200) { void send(job, {...base, source}); return; }
   const rawAge = entry.response.headers.find(h => h.name.toLowerCase() === "age")?.value ?? "0";
   const age = Number(rawAge);
-  if (!rawAge.trim() || !Number.isFinite(age) || age < 0 || age > 120) return;
+  if (!rawAge.trim() || !Number.isFinite(age) || age < 0 || age > 120) {
+    void progress(job, "cache_rejected"); return;
+  }
   entry.getContent((text, encoding) => {
-    if (active !== job || !text || text.length > 2e6) return;
+    if (active !== job) return;
+    if (!text || text.length > 2e6) { void progress(job, "body_unavailable"); return; }
     let product;
     try {
       const json = encoding === "base64" ? new TextDecoder().decode(Uint8Array.from(atob(text), c => c.charCodeAt(0))) : text;
       product = publicProduct(JSON.parse(json), nm);
-    } catch (_) { return; }
-    if (!product) return;
+    } catch (_) { void progress(job, "invalid_json"); return; }
+    if (!product) { void progress(job, "product_not_matched"); return; }
+    void progress(job, "products_received");
     const serialized = JSON.stringify(product);
     if (!job.products.some(p => JSON.stringify(p) === serialized)) job.products.push(product);
-    if (job.products.length > 10) { active = null; return; }
+    if (job.products.length > 10) { void progress(job, "too_many_products"); active = null; return; }
     clearTimeout(timer);
     timer = setTimeout(() => void send(job, {...base, source, age_seconds: age,
       products: job.products, dest: url.searchParams.get("dest")}), 1000);
   });
+});
+
+chrome.devtools.network.onNavigated.addListener(() => {
+  if (active) void progress(active, "navigated");
 });
 
 async function poll() {
@@ -102,13 +131,24 @@ async function poll() {
   polling = true;
   try {
     if (active && Date.now() / 1000 - active.issued_at > 75) active = null;
-    const {job} = await local("/job?session=" + encodeURIComponent(session));
+    const {job} = await local("/job?session=" + encodeURIComponent(session) + "&v=2");
     if (job) {
       const url = new URL(job.url);
       if (url.origin !== "https://www.wildberries.ru" || !/^\/catalog\/\d+\/detail\.aspx$/.test(url.pathname)) return;
       clearTimeout(timer);
-      active = {...job, products: []};
-      await chrome.tabs.update(tabId, {url: job.url});
+      const current = active = {...job, products: []};
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        const page = new URL(tab.url);
+        if (page.origin === url.origin && page.pathname === url.pathname &&
+            page.searchParams.get("size") === url.searchParams.get("size")) {
+          await progress(current, "reload_requested");
+          await chrome.tabs.reload(tabId);
+        } else {
+          await progress(current, "navigation_requested");
+          await chrome.tabs.update(tabId, {url: job.url});
+        }
+      } catch (_) { await progress(current, "navigation_failed"); }
     }
   } catch (_) { /* Retry local connection; no WB requests are retried here. */ }
   finally { polling = false; }

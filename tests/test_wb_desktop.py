@@ -132,16 +132,25 @@ async def test_real_loopback_transport_authentication_and_end_to_end_job(tmp_pat
             assert (await client.options(url + '/job', headers={'Origin': 'https://www.wildberries.ru'})).status_code == 403
             health = await client.get(url + '/health', headers={**headers, 'Origin': origin})
             assert health.headers['Access-Control-Allow-Origin'] == origin
-            await client.get(url + '/job?session=' + SESSION, headers=headers)
+            old = await client.get(url + '/job?session=' + SESSION, headers=headers)
+            assert old.json()['reload_extension'] is True
+            await client.get(url + '/job?session=' + SESSION + '&v=2', headers=headers)
             adapter = WildberriesAdapter(client=client, gap=0)
             pending = asyncio.create_task(adapter.fetch(parse_link(URL)))
             try:
                 for _ in range(100):
-                    response = await client.get(url + '/job?session=' + SESSION, headers=headers)
+                    response = await client.get(url + '/job?session=' + SESSION + '&v=2', headers=headers)
                     job = response.json()['job']
                     if job: break
                     await asyncio.sleep(0.01)
                 assert job
+                progress = {'job_id': job['id'], 'session': SESSION, 'event': 'reload_requested',
+                            'cookie': 'PRIVATE', 'status': 200}
+                assert (await client.post(url + '/progress', json=progress, headers=headers)).status_code == 200
+                diagnostic = (await client.get(url + '/health', headers=headers)).json()
+                assert diagnostic['extension_revision'] == 2
+                assert diagnostic['trace'][-1] == {'event': 'reload_requested', 'status': 200}
+                assert 'PRIVATE' not in repr(diagnostic)
                 result = {'job_id': job['id'], 'session': SESSION, 'page_url': URL,
                     'started_at': time.time(), 'status': 200, 'source': wb_browser.SOURCE,
                     'age_seconds': 0, 'products': [PRODUCT], 'dest': '1259570991'}
@@ -215,3 +224,14 @@ async def test_browser_preview_and_fresh_monitoring_reach_database_and_queue(sto
         with store.tx() as session:
             assert len(list(session.scalars(select(NotificationQueue)))) == 1
     assert len(calls) == 2
+
+
+async def test_progress_rejects_untrusted_events_and_reports_navigation_failure():
+    broker = Broker(timeout=1)
+    task, result = await start_job(broker)
+    for fields in ({'session': 'wrong'}, {'event': 'PRIVATE'}, {'job_id': 'wrong'}):
+        report = {**result, 'event': 'reload_requested', **fields}
+        with pytest.raises(BridgeError): broker.progress(report)
+    broker.progress({**result, 'event': 'navigation_failed'})
+    with pytest.raises(BridgeError, match='navigation_failed'): await task
+    assert broker.trace[-1]['event'] == 'navigation_failed'
