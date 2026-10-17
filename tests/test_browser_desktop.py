@@ -76,3 +76,18 @@ def test_browser_start_failure_stops_private_vnc(tmp_path, monkeypatch):
     assert (tmp_path / 'var/manual-browser-stable-profile').is_dir()
     vnc.terminate.assert_called_once()
     vnc.wait.assert_called_once_with(timeout=5)
+
+
+def test_manual_browser_accepts_wb_url_and_preserves_selected_size():
+    url = 'https://www.wildberries.ru/catalog/518397236/detail.aspx?size=716573024'
+    assert desktop.card_url(url) == url
+
+
+@pytest.mark.parametrize('url', ['https://www.wildberries.ru/catalog/123/detail.aspx?size=1&size=2',
+    'https://www.wildberries.ru/catalog/123/detail.aspx?size=',
+    'https://www.wildberries.ru/catalog/123/detail.aspx?size=bad',
+    'https://www.wildberries.ru/catalog/123/detail.aspx?size=0',
+    'https://www.wildberries.ru/search/', 'https://wildberries.ru.evil.test/catalog/123/detail.aspx'])
+def test_manual_browser_rejects_ambiguous_or_unrelated_wb_urls(url):
+    with pytest.raises(desktop.argparse.ArgumentTypeError):
+        desktop.card_url(url)

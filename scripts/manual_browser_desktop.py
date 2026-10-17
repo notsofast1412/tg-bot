@@ -6,12 +6,13 @@ Run as paintbot under xvfb-run. The browser keeps its normal sandbox enabled.
 import argparse
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import socket
 import subprocess
 import threading
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 
 DEFAULT_URL = 'https://www.ozon.ru/product/197922669/'
@@ -36,11 +37,20 @@ def browser_path(root, requested=None):
 def card_url(value):
     try:
         parsed = urlsplit(value)
-        if (parsed.scheme != 'https' or parsed.hostname not in ('ozon.ru', 'www.ozon.ru')
-                or parsed.username or parsed.password or parsed.port or not parsed.path.startswith('/product/')):
+        if parsed.scheme != 'https' or parsed.username or parsed.password or parsed.port:
+            raise ValueError()
+        if parsed.hostname in ('ozon.ru', 'www.ozon.ru'):
+            if not parsed.path.startswith('/product/'):
+                raise ValueError()
+        elif parsed.hostname in ('wildberries.ru', 'www.wildberries.ru'):
+            sizes = parse_qs(parsed.query, keep_blank_values=True).get('size', [])
+            if (not re.fullmatch(r'/catalog/[1-9]\d*/detail\.aspx/?', parsed.path)
+                    or (sizes and (len(sizes) != 1 or not re.fullmatch(r'[1-9]\d*', sizes[0])))):
+                raise ValueError()
+        else:
             raise ValueError()
     except ValueError:
-        raise argparse.ArgumentTypeError('Use an HTTPS Ozon product URL without credentials or port') from None
+        raise argparse.ArgumentTypeError('Use an HTTPS WB/Ozon product URL without credentials or port') from None
     return value
 
 
