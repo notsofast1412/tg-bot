@@ -17,7 +17,8 @@ from paintbot.scheduler.monitor import Monitor
 
 async def test_429_cooldown_does_not_sleep_or_block_other_markets(store, card, product_id):
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(429, headers={"Retry-After": "7200"})))
-    adapter = WildberriesAdapter(client=client, gap=0)
+    adapter = WildberriesAdapter(client=client, gap=0, browser_fetch=AsyncMock(return_value={
+        "schema": 1, "error": "http_429", "retry_after": 7200}))
     monitor = Monitor(store, {"wb": adapter})
     try:
         await monitor.cycle()
@@ -38,13 +39,12 @@ async def test_wb_block_does_not_try_fallback():
     def respond(r):
         calls.append(r.url.host)
         return httpx.Response(403)
-    client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
-    try:
-        with pytest.raises(MarketError):
-            await WildberriesAdapter(client=client, gap=0).fetch(from_article("wb", "123"))
-        assert calls == ["card.wb.ru"]
-    finally:
-        await client.aclose()
+    fetch = AsyncMock(return_value={'schema': 1, 'error': 'http_403'})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(MarketError, match='403'):
+            await WildberriesAdapter(client=client, gap=0, browser_fetch=fetch).fetch(from_article("wb", "123"))
+        fetch.assert_awaited_once()
+        assert calls == []
 
 
 async def test_telegram_transport_serialization_and_api_response():

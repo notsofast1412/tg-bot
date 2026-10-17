@@ -1,29 +1,65 @@
-from .base import Adapter, Card
+import time
 from urllib.parse import urljoin, urlsplit
 
+from .base import Adapter, Card
 from .links import MarketError, is_ozon_short, parse_link
+from .browser import check_report, fetch_wb_page
 
 
 class WildberriesAdapter(Adapter):
     market = "wb"
 
+    def __init__(self, client=None, gap=5, browser_fetch=None):
+        super().__init__(client=client, gap=gap)
+        self.browser_fetch = browser_fetch or fetch_wb_page
+
     async def fetch(self, ref):
-        if ref.marketplace != self.market:
+        if ref.marketplace != self.market or parse_link(ref.url) != ref:
             raise MarketError("Неверный адаптер")
-        try:
-            nm_id = ref.card_id.split("|", 1)[0]
-            response = await self.request("https://card.wb.ru/cards/v2/detail?appType=1&curr=rub&dest=-1257786&nm=" + nm_id)
-            return self.parse_api(ref, response.json())
-        except (MarketError, ValueError, KeyError, TypeError) as exc:
-            # A block is never bypassed with another technique.
-            if isinstance(exc, MarketError) and any(w in str(exc) for w in ("403", "401", "429")):
-                raise
+        async with self.lock:
+            await self.wait_turn()
             try:
-                card = await super().fetch(ref)
-                card.source += " (резерв WB)"
-                return card
-            except MarketError as fallback:
-                raise MarketError(f"WB API: {str(exc)[:180]}; HTML: {fallback}") from None
+                report = check_report(await self.browser_fetch(ref.url))
+                return self.parse_browser(ref, report)
+            except MarketError as exc:
+                if exc.retry_after:
+                    self.blocked_until = time.time() + exc.retry_after
+                raise
+
+    def parse_browser(self, ref, report):
+        report = check_report(report)
+        nm_id, _, selected = ref.card_id.partition("|size:")
+        if report.get('card_id') != nm_id or report.get('size') != (selected or None):
+            raise MarketError("Браузер вернул другой артикул или вариант WB")
+        cards = []
+        for snapshot in report['products']:
+            if not isinstance(snapshot, dict) or str(snapshot.get('id')) != nm_id:
+                raise MarketError("Браузер вернул другой товар WB")
+            if not isinstance(snapshot.get('name'), str) or not snapshot['name'].strip():
+                raise MarketError("WB не подтвердил название товара")
+            if not isinstance(snapshot.get('sizes'), list):
+                raise MarketError("WB не подтвердил структуру вариантов")
+            product = dict(snapshot)
+            product['sizes'] = []
+            for size in snapshot.get('sizes', []):
+                if not isinstance(size, dict):
+                    raise MarketError("WB не подтвердил структуру варианта")
+                size = dict(size)
+                if not isinstance(size.get('price', {}), dict):
+                    size['price'] = {}
+                if 'stock_qty' in size:
+                    quantity = size.pop('stock_qty')
+                    if type(quantity) is not int or quantity < 0:
+                        raise MarketError("Не подтверждён остаток варианта WB")
+                    size['stocks'] = [{'qty': quantity}]
+                product['sizes'].append(size)
+            cards.append(self.parse_api(ref, {'products': [product]}))
+        card = cards[-1]
+        if len({entry.price for entry in cards}) != 1:
+            card.price = None
+            card.warning = "Ответы страницы содержат разные цены или остатки; цена не подтверждена"
+        card.source = "WB browser /__internal/u-card/cards/v4/detail; price.product; регион профиля браузера"
+        return card
 
     def parse_api(self, ref, payload):
         nm_id, _, selected = ref.card_id.partition("|size:")

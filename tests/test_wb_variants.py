@@ -1,5 +1,6 @@
 import httpx
 import pytest
+from unittest.mock import AsyncMock
 
 from paintbot.marketplaces import WildberriesAdapter
 from paintbot.marketplaces.links import MarketError, parse_link
@@ -54,14 +55,16 @@ async def test_unconfirmed_or_unavailable_size_never_uses_other_variant(case):
         assert card.price is None and card.warning
 
 
-async def test_api_request_uses_base_nm_id_only_and_keeps_selected_identity():
-    calls = []
-    def respond(request):
-        calls.append(request)
-        return httpx.Response(200, json=payload())
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        card = await WildberriesAdapter(client=client, gap=0).fetch(parse_link(URL))
-        assert calls[0].url.params["nm"] == "29220652"
+async def test_browser_request_preserves_the_selected_card_and_variant():
+    report = {'schema': 1, 'page_http': 200, 'same_card_and_size': True,
+              'card_id': '29220652', 'size': '65383223',
+              'products': [{'id': '29220652', 'name': 'Краска', 'sizes': [
+                  {'optionId': 65383223, 'stock_qty': 2, 'price': {'product': 50000}},
+                  {'optionId': 65383224, 'stock_qty': 2, 'price': {'product': 10000}}]}]}
+    fetch = AsyncMock(return_value=report)
+    async with httpx.AsyncClient() as client:
+        card = await WildberriesAdapter(client=client, gap=0, browser_fetch=fetch).fetch(parse_link(URL))
+        fetch.assert_awaited_once_with(URL)
         assert card.card_id == "29220652|size:65383223"
         assert card.price == 50000
 

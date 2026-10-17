@@ -11,7 +11,7 @@ if [[ "$ID" != ubuntu || "$(dpkg --print-architecture)" != amd64 ]]; then
     exit 1
 fi
 apt-get update
-apt-get install -y ca-certificates curl gnupg
+apt-get install -y ca-certificates curl gnupg xvfb xauth
 install -d -m 755 /etc/apt/keyrings
 browser_key=$(mktemp)
 browser_keyring=$(mktemp)

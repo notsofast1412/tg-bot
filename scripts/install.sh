@@ -9,6 +9,11 @@ if [[ ! -x .venv/bin/python ]]; then
 fi
 .venv/bin/python -c 'import sys; assert (3, 12) <= sys.version_info[:2] <= (3, 13), "Use Python 3.12 or 3.13 for the pinned dependencies"'
 .venv/bin/python -m pip install --cache-dir /tmp/paintbot-pip-cache -r requirements.lock
+# Separate Python environment for the browser worker; bot dependencies stay isolated.
+if [[ ! -x .browser-probe/bin/python ]]; then
+    .venv/bin/python -m venv .browser-probe
+fi
+.browser-probe/bin/python -m pip install --cache-dir /tmp/paintbot-pip-cache -r requirements-browser.lock
 .venv/bin/python -m alembic upgrade head
 .venv/bin/python -m scripts.manage seed
 .venv/bin/python -m pytest -q
@@ -17,3 +22,4 @@ if [[ ! -f .env ]]; then
     chmod 600 .env
 fi
 echo 'Setup complete. Configure BOT_TOKEN and OWNER_ID securely in .env before starting.'
+echo 'WB requires Google Chrome, Xvfb and xauth; install them as root with scripts/install_browser.sh.'

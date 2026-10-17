@@ -32,6 +32,7 @@ for unit in paintbot.service paintbot-backup.service paintbot-backup.timer; do
 done
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv ca-certificates
+bash scripts/install_browser.sh
 useradd --system --user-group --home-dir /opt/paintbot --shell /usr/sbin/nologin paintbot
 chown -R paintbot:paintbot /opt/paintbot
 chmod 750 /opt/paintbot
