@@ -6,7 +6,7 @@ no cookies, headers, full API responses, or account data are exported.
 """
 import argparse
 import asyncio
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 import fcntl
 import json
 import math
@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import time
 from email.utils import parsedate_to_datetime
@@ -96,6 +97,50 @@ class BrowserError(Exception):
     pass
 
 
+@asynccontextmanager
+async def native_context(playwright, executable, profile):
+    # Start the same ordinary Chrome command used in the successful manual test.
+    # The debugging endpoint is ephemeral and bound only to loopback.
+    with socket.socket() as reservation:
+        reservation.bind(('127.0.0.1', 0))
+        port = reservation.getsockname()[1]
+    chrome = subprocess.Popen([
+        executable, '--user-data-dir=' + str(profile), '--lang=ru-RU', '--no-first-run',
+        '--no-proxy-server', '--remote-debugging-address=127.0.0.1',
+        '--remote-debugging-port=' + str(port), 'about:blank',
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    browser = None
+    try:
+        for _ in range(150):
+            if chrome.poll() is not None:
+                raise BrowserError('busy' if chrome.returncode == 0 else 'browser_failed')
+            try:
+                _, connection = await asyncio.open_connection('127.0.0.1', port)
+                connection.close()
+                await connection.wait_closed()
+                break
+            except OSError:
+                await asyncio.sleep(0.1)
+        else:
+            raise BrowserError('timeout')
+        browser = await playwright.chromium.connect_over_cdp(f'http://127.0.0.1:{port}', timeout=10000)
+        if len(browser.contexts) != 1:
+            raise BrowserError('browser_failed')
+        yield browser.contexts[0]
+    finally:
+        try:
+            if browser is not None:
+                await browser.close()
+        finally:
+            if chrome.poll() is None:
+                chrome.terminate()
+                try:
+                    await asyncio.to_thread(chrome.wait, timeout=5)
+                except subprocess.TimeoutExpired:
+                    chrome.kill()
+                    await asyncio.to_thread(chrome.wait)
+
+
 @contextmanager
 def browser_lock(root):
     path = root / 'var/wb-browser.lock'
@@ -127,18 +172,12 @@ async def probe(url, browser=None):
     profile = root / ('var/manual-browser-profile' if Path(executable) == managed
                       else 'var/manual-browser-stable-profile')
     profile.mkdir(parents=True, exist_ok=True, mode=0o700)
-    output = {'schema': 1, 'browser': version, 'card_id': nm_id, 'size': selected_size,
+    output = {'schema': 1, 'browser': version, 'launch_mode': 'native_cdp', 'card_id': nm_id, 'size': selected_size,
               'responses': [], 'products': [], 'price_blocks': {}}
     pending = set()
-    async with async_playwright() as playwright:
-        context = await playwright.chromium.launch_persistent_context(
-            str(profile), executable_path=executable, headless=False,
-            chromium_sandbox=True, args=['--no-proxy-server'], locale='ru-RU')
+    async with async_playwright() as playwright, native_context(playwright, executable, profile) as context:
         try:
             page = context.pages[0] if context.pages else await context.new_page()
-            cdp = await context.new_cdp_session(page)
-            await cdp.send('Network.enable')
-            await cdp.send('Network.setCacheDisabled', {'cacheDisabled': True})
 
             async def inspect_response(response):
                 status = None
@@ -235,7 +274,6 @@ async def probe(url, browser=None):
                 for task in unfinished:
                     task.cancel()
                 await asyncio.gather(*unfinished, return_exceptions=True)
-            await context.close()
     if not output.get('error') and not output['products']:
         denied = next((item['status'] for item in output['responses']
                        if item['source_allowed'] and item['status'] >= 400), None)

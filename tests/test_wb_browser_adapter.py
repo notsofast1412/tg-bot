@@ -132,13 +132,13 @@ def worker(tmp_path, monkeypatch):
     return browser, script, processes
 
 
-async def test_real_worker_roundtrip_keeps_secrets_out_and_writes_under_var(worker, monkeypatch, report):
+async def test_real_worker_roundtrip_keeps_normal_home_and_secrets_out(worker, monkeypatch, report):
     browser, script, processes = worker
     monkeypatch.setenv('BOT_TOKEN', 'PRIVATE_TOKEN')
     script.write_text('import os, json\nfrom pathlib import Path\n'
         'assert "BOT_TOKEN" not in os.environ\n'
-        'assert Path(os.environ["HOME"]).parent == Path.cwd() / "var"\n'
-        'assert Path(os.environ["XDG_CACHE_HOME"]).parent == Path.cwd() / "var"\n'
+        'assert Path(os.environ["HOME"]) == Path.cwd()\n'
+        'assert "XDG_CACHE_HOME" not in os.environ\n'
         + 'print(' + repr(json.dumps(report)) + ')\n')
     result = await browser.fetch_wb_page(URL)
     assert result == report

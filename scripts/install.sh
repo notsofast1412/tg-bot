@@ -2,6 +2,7 @@
 set -euo pipefail
 umask 077
 cd "$(dirname "$0")/.."
+mkdir -p var .cache .config .pki
 if [[ ! -x .venv/bin/python ]]; then
     runtime_python="${PYTHON_BIN:-python3}"
     "$runtime_python" -c 'import sys; assert (3, 12) <= sys.version_info[:2] <= (3, 13), "Use Python 3.12 or 3.13 for the pinned dependencies"'

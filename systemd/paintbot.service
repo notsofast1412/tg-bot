@@ -20,7 +20,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/paintbot/var
+ReadWritePaths=/opt/paintbot/var /opt/paintbot/.cache /opt/paintbot/.config /opt/paintbot/.pki
 
 [Install]
 WantedBy=multi-user.target

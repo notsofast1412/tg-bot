@@ -48,12 +48,13 @@ async def fetch_wb_page(url):
     if not python.is_file():
         raise MarketError(ERRORS['browser_missing'])
     environment = dict(os.environ)
-    # Chrome must write only under var, including with ProtectSystem=strict.
-    for key in ('HOME', 'XDG_CACHE_HOME', 'XDG_CONFIG_HOME'):
-        directory = root / 'var' / {'HOME': 'browser-home', 'XDG_CACHE_HOME': 'browser-cache',
-                                   'XDG_CONFIG_HOME': 'browser-config'}[key]
+    # Preserve the normal application user's HOME, as in the successful manual run.
+    # systemd permits writing only the browser's private home directories and var.
+    environment['HOME'] = str(root)
+    for directory in (root / '.cache', root / '.config', root / '.pki'):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        environment[key] = str(directory)
+    for key in ('XDG_CACHE_HOME', 'XDG_CONFIG_HOME'):
+        environment.pop(key, None)
     for key in ('BOT_TOKEN', 'OWNER_ID', 'GROUP_ID'):
         environment.pop(key, None)
     environment['PLAYWRIGHT_BROWSERS_PATH'] = str(root / 'var/chromium')

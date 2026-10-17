@@ -1,4 +1,4 @@
-from copy import deepcopy
+from contextlib import asynccontextmanager
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -31,12 +31,19 @@ def browser_page(tmp_path, monkeypatch):
             callbacks['response'](api)
         return doc
     page.goto = AsyncMock(side_effect=navigate)
-    cdp = SimpleNamespace(send=AsyncMock())
-    context = SimpleNamespace(pages=[page], new_cdp_session=AsyncMock(return_value=cdp), close=AsyncMock())
-    launch = AsyncMock(return_value=context)
+    context = SimpleNamespace(pages=[page], close=AsyncMock())
+    native_calls = []
+    @asynccontextmanager
+    async def native(playwright, executable, profile):
+        native_calls.append((executable, profile))
+        try:
+            yield context
+        finally:
+            await context.close()
+    monkeypatch.setattr(worker, 'native_context', native)
     class Manager:
         async def __aenter__(self):
-            return SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=launch))
+            return SimpleNamespace()
         async def __aexit__(self, *args):
             pass
     parent = ModuleType('playwright')
@@ -49,7 +56,7 @@ def browser_page(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, 'project_root', lambda: tmp_path)
     monkeypatch.setattr(worker.shutil, 'which', lambda name: '/usr/bin/google-chrome-stable')
     monkeypatch.setattr(worker.subprocess, 'run', lambda *args, **kwargs: SimpleNamespace(stdout='Chrome test'))
-    return SimpleNamespace(api=api, doc=doc, page=page, context=context, launch=launch, cdp=cdp, callbacks=callbacks)
+    return SimpleNamespace(api=api, doc=doc, page=page, context=context, native_calls=native_calls, callbacks=callbacks)
 
 
 async def test_collects_actual_page_response_and_closes_context(browser_page):
@@ -59,11 +66,10 @@ async def test_collects_actual_page_response_and_closes_context(browser_page):
     assert result['products'][0]['sizes'][0]['price']['product'] == 26300
     assert result['products'][0]['sizes'][0]['optionId'] == 716573024
     browser_page.context.close.assert_awaited_once()
-    kwargs = browser_page.launch.call_args.kwargs
-    assert kwargs['headless'] is False and kwargs['chromium_sandbox'] is True
-    assert kwargs['args'] == ['--no-proxy-server']
-    assert 'ignore_https_errors' not in kwargs
-    browser_page.cdp.send.assert_any_await('Network.setCacheDisabled', {'cacheDisabled': True})
+    assert result['launch_mode'] == 'native_cdp'
+    assert browser_page.native_calls[0][0] == '/usr/bin/google-chrome-stable'
+    assert browser_page.native_calls[0][1].name == 'manual-browser-stable-profile'
+
 
 
 @pytest.mark.parametrize('case,error', [('doc403', 'http_403'), ('doc498', 'http_498'), ('doc500', 'http_500'),
