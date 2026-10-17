@@ -5,6 +5,13 @@ from paintbot.database.store import Store
 from paintbot.marketplaces.base import Card
 
 
+@pytest.fixture(autouse=True)
+def isolate_local_browser_configuration(tmp_path, monkeypatch):
+    # Installing/testing on the server must not navigate its real Chrome profile.
+    from paintbot.marketplaces import wb_browser
+    monkeypatch.setattr(wb_browser, 'KEY_PATH', tmp_path / 'no-browser-config')
+
+
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     path = tmp_path / "test.db"

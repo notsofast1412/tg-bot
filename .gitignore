@@ -1,4 +1,7 @@
 .venv/
+.cache/
+.config/
+.pki/
 .browser-probe/
 .env
 *.db

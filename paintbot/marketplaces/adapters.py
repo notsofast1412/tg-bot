@@ -1,15 +1,48 @@
 from .base import Adapter, Card
+import asyncio
+import time
 from urllib.parse import urljoin, urlsplit
 
 from .links import MarketError, is_ozon_short, parse_link
+from . import wb_browser
 
 
 class WildberriesAdapter(Adapter):
     market = "wb"
 
+    def __init__(self, client=None, gap=5, browser=None):
+        super().__init__(client=client, gap=gap)
+        self.use_browser = wb_browser.KEY_PATH.is_file() if browser is None else browser
+
     async def fetch(self, ref):
         if ref.marketplace != self.market:
             raise MarketError("Неверный адаптер")
+        if self.use_browser:
+            if parse_link(ref.url) != ref:
+                raise MarketError('Неверная карточка WB')
+            async with self.lock:
+                if self.blocked_until > time.time():
+                    raise MarketError('WB запросил паузу после HTTP 429',
+                                      retry_after=int(self.blocked_until - time.time()) + 1)
+                await asyncio.sleep(max(0, self.next_request - time.monotonic()))
+                self.next_request = time.monotonic() + self.gap
+                try:
+                    report = await wb_browser.fetch_browser(self.client, ref)
+                    nm = ref.card_id.split('|')[0]
+                    cards = [self.parse_api(ref, {'products': [wb_browser.public_product(
+                        {'products': [product]}, nm)]}) for product in report['products']]
+                    card = cards[-1]
+                    if len({c.price for c in cards}) != 1:
+                        card.price = None
+                        card.warning = 'Ответы WB содержат разные цены или остатки; цена не подтверждена'
+                    card.source = 'WB Chrome DevTools; price.product без кошелька; регион браузера'
+                    if report.get('dest'):
+                        card.attributes['WB dest'] = report['dest']
+                    return card
+                except MarketError as exc:
+                    if exc.retry_after:
+                        self.blocked_until = time.time() + exc.retry_after
+                    raise
         try:
             nm_id = ref.card_id.split("|", 1)[0]
             response = await self.request("https://card.wb.ru/cards/v2/detail?appType=1&curr=rub&dest=-1257786&nm=" + nm_id)
@@ -34,17 +67,28 @@ class WildberriesAdapter(Adapter):
         product = matches[0]
         attrs = {k: product[k] for k in ("brand", "colors", "supplier") if product.get(k)}
         sizes = product.get("sizes", [])
+        single_variant = len(sizes) == 1
+
+        def variant_id(size):
+            old, new = size.get('chrtId'), size.get('optionId')
+            if old is not None and new is not None and str(old) != str(new):
+                return None
+            value = old if old is not None else new
+            return str(value) if type(value) in (int, str) else None
+
         if selected:
-            sizes = [size for size in sizes if str(size.get("chrtId")) == selected]
+            sizes = [size for size in sizes if variant_id(size) == selected]
             attrs["Запрошенный вариант chrtId"] = selected
             if len(sizes) != 1:
                 return Card("wb", ref.card_id, ref.url, product["name"][:500], nm_id, None, attrs,
-                            "WB cards/v2", "Выбранный size не подтверждён единственным chrtId; цена другого варианта не используется")
+                            "WB cards", "Выбранный size не подтверждён единственным chrtId/optionId; цена другого варианта не используется")
             attrs["Вариант WB"] = {key: sizes[0][key] for key in ("name", "origName") if sizes[0].get(key)}
         prices = set()
         for size in sizes:
             # Only an available size with a direct product price qualifies.
-            if sum(s.get("qty", 0) for s in size.get("stocks", [])) <= 0:
+            available = (sum(s.get('qty', 0) for s in size['stocks']) > 0 if 'stocks' in size else
+                         single_variant and type(product.get('totalQuantity')) is int and product['totalQuantity'] > 0)
+            if not available:
                 continue
             value = size.get("price", {}).get("product")
             if isinstance(value, int) and not isinstance(value, bool) and value > 0:
