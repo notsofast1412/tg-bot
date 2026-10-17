@@ -72,3 +72,40 @@ async def test_html_without_exact_variant_url_is_not_used():
     async with httpx.AsyncClient() as client:
         with pytest.raises(MarketError):
             WildberriesAdapter(client=client).parse_html(parse_link(URL), html(base, sku="29220652"))
+
+
+@pytest.mark.parametrize('wrapper', [True, False])
+async def test_option_id_and_single_variant_total_stock(wrapper):
+    product = {'id': 29220652, 'name': 'Краска', 'totalQuantity': 1,
+               'sizes': [{'optionId': 65383223, 'price': {'product': 26300, 'basic': 51600}}]}
+    data = {'products': [product]}
+    if wrapper:
+        data = {'data': data}
+    async with httpx.AsyncClient() as client:
+        card = WildberriesAdapter(client=client).parse_api(parse_link(URL), data)
+        assert card.card_id == '29220652|size:65383223'
+        assert card.price == 26300
+
+
+@pytest.mark.parametrize('case', ['wrong_size', 'conflicting_ids', 'multiple_sizes', 'empty_stocks',
+                                  'out_of_stock', 'unknown_stock', 'invalid_stock'])
+async def test_new_schema_never_infers_unconfirmed_variant_stock(case):
+    size = {'optionId': 65383223, 'price': {'product': 26300}}
+    product = {'id': 29220652, 'name': 'Краска', 'totalQuantity': 1, 'sizes': [size]}
+    if case == 'wrong_size':
+        size['optionId'] = 999
+    elif case == 'conflicting_ids':
+        size['chrtId'] = 999
+    elif case == 'multiple_sizes':
+        product['sizes'].append({'optionId': 999, 'price': {'product': 10000}})
+    elif case == 'empty_stocks':
+        size['stocks'] = []
+    elif case == 'out_of_stock':
+        product['totalQuantity'] = 0
+    elif case == 'unknown_stock':
+        del product['totalQuantity']
+    else:
+        product['totalQuantity'] = True
+    async with httpx.AsyncClient() as client:
+        card = WildberriesAdapter(client=client).parse_api(parse_link(URL), {'products': [product]})
+        assert card.price is None and card.warning

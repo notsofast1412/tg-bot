@@ -85,3 +85,27 @@ def test_blank_optional_group_and_secret_configuration(monkeypatch):
     config = Config(_env_file=None)
     assert config.group_id is None
     assert "TEST_TOKEN" not in repr(config)
+
+
+async def test_request_spacing_remains_serial_with_randomized_pauses(monkeypatch):
+    from paintbot.marketplaces import base
+    clock = [100.0]
+    requests = []
+    samples = iter([5.5, 7.0, 6.0])
+    # Keep the event loop clock unchanged.
+    from types import SimpleNamespace
+    monkeypatch.setattr(base, 'time', SimpleNamespace(monotonic=lambda: clock[0], time=lambda: 1000))
+    monkeypatch.setattr(base, 'random', SimpleNamespace(uniform=lambda lower, upper: next(samples)))
+    async def pause(seconds):
+        assert seconds >= 0
+        clock[0] += seconds
+    monkeypatch.setattr(base.asyncio, 'sleep', pause)
+    def respond(request):
+        requests.append(clock[0])
+        return httpx.Response(200)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter = OzonAdapter(client=client, gap=5)
+        import asyncio
+        await asyncio.gather(*(adapter.request('https://www.ozon.ru/product/123/') for _ in range(3)))
+    assert requests == [100.0, 105.5, 112.5]
+    assert all(b - a >= 5 for a, b in zip(requests, requests[1:]))

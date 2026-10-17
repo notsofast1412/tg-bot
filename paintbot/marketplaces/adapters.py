@@ -34,17 +34,32 @@ class WildberriesAdapter(Adapter):
         product = matches[0]
         attrs = {k: product[k] for k in ("brand", "colors", "supplier") if product.get(k)}
         sizes = product.get("sizes", [])
+        single_variant = len(sizes) == 1
+
+        def variant_id(size):
+            old, new = size.get("chrtId"), size.get("optionId")
+            if old is not None and new is not None and str(old) != str(new):
+                return None
+            value = old if old is not None else new
+            return str(value) if type(value) in (int, str) else None
+
         if selected:
-            sizes = [size for size in sizes if str(size.get("chrtId")) == selected]
+            sizes = [size for size in sizes if variant_id(size) == selected]
             attrs["Запрошенный вариант chrtId"] = selected
             if len(sizes) != 1:
                 return Card("wb", ref.card_id, ref.url, product["name"][:500], nm_id, None, attrs,
-                            "WB cards/v2", "Выбранный size не подтверждён единственным chrtId; цена другого варианта не используется")
+                            "WB cards", "Выбранный size не подтверждён единственным chrtId/optionId; цена другого варианта не используется")
             attrs["Вариант WB"] = {key: sizes[0][key] for key in ("name", "origName") if sizes[0].get(key)}
         prices = set()
         for size in sizes:
             # Only an available size with a direct product price qualifies.
-            if sum(s.get("qty", 0) for s in size.get("stocks", [])) <= 0:
+            if "stocks" in size:
+                available = sum(s.get("qty", 0) for s in size["stocks"]) > 0
+            else:
+                quantity = product.get("totalQuantity")
+                # Total product stock identifies a size only for a single-size card.
+                available = single_variant and type(quantity) is int and quantity > 0
+            if not available:
                 continue
             value = size.get("price", {}).get("product")
             if isinstance(value, int) and not isinstance(value, bool) and value > 0:
@@ -52,7 +67,7 @@ class WildberriesAdapter(Adapter):
         price = next(iter(prices)) if len(prices) == 1 else None
         warning = None if price is not None else "Нет доступной цены или цены вариантов различаются"
         return Card("wb", ref.card_id, ref.url, product["name"][:500], nm_id, price, attrs,
-                    "WB cards/v2; обычная цена без кошелька; регион dest=-1257786", warning)
+                    "WB cards; price.product без кошелька; регион dest=-1257786", warning)
 
 
 class OzonAdapter(Adapter):
