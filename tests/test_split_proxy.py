@@ -9,7 +9,7 @@ from paintbot.marketplaces.adapters import make_adapters
 from paintbot.marketplaces.links import MarketError
 
 
-async def test_both_marketplaces_can_share_russian_gateway_without_rerouting_yandex(monkeypatch):
+async def test_both_marketplaces_can_share_russian_gateway_without_changing_system_proxy(monkeypatch):
     from paintbot.marketplaces import base
     original_client = httpx.AsyncClient
     created, requests = [], []
@@ -25,7 +25,7 @@ async def test_both_marketplaces_can_share_russian_gateway_without_rerouting_yan
     proxy = "http://10.99.0.1:3128"
     adapters = make_adapters(gap=0, wb_proxy_url=proxy, ozon_proxy_url=proxy)
     try:
-        assert created == [proxy, proxy, None]
+        assert created == [proxy, proxy]
         for market, url in (("wb", "https://card.wb.ru/"), ("ozon", "https://ozon.ru/t/8M08OsF")):
             with pytest.raises(MarketError):
                 await adapters[market].request(url)

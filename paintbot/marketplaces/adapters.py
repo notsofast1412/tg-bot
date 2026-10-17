@@ -1,7 +1,7 @@
 from .base import Adapter, Card
 from urllib.parse import urljoin, urlsplit
 
-from .links import MarketError, is_ozon_short, is_yandex_short, parse_link
+from .links import MarketError, is_ozon_short, parse_link
 
 
 class WildberriesAdapter(Adapter):
@@ -85,37 +85,6 @@ class OzonAdapter(Adapter):
         raise MarketError("Слишком много перенаправлений короткой ссылки")
 
 
-class YandexMarketAdapter(Adapter):
-    market = "yandex"
-
-    async def resolve_short(self, url):
-        if not is_yandex_short(url):
-            raise MarketError("Некорректная короткая ссылка Яндекс Маркета")
-        url = "https://" + url.split("://", 1)[1]
-        visited = set()
-        for _ in range(3):
-            if url in visited:
-                raise MarketError("Цикл коротких ссылок Яндекс Маркета")
-            visited.add(url)
-            response = await self.request(url, allow_redirect=True)
-            location = response.headers.get("location") if response.is_redirect else None
-            if not location:
-                raise MarketError("Короткая ссылка Яндекс Маркета не раскрылась в карточку")
-            target = urljoin(url, location)
-            if urlsplit(target).scheme != "https":
-                raise MarketError("Небезопасное перенаправление короткой ссылки")
-            if urlsplit(target).path.rstrip("/") == "/showcaptcha":
-                raise MarketError("Яндекс Маркет направил на CAPTCHA; обход не выполняется")
-            if is_yandex_short(target):
-                url = target
-                continue
-            ref = parse_link(target)
-            if ref.marketplace != "yandex":
-                raise MarketError("Короткая ссылка ведёт на другую площадку")
-            return ref
-        raise MarketError("Слишком много перенаправлений короткой ссылки")
-
-
 def validate_marketplace_proxy(value, variable_name):
     if value is None or not value.strip():
         return None
@@ -144,4 +113,4 @@ def make_adapters(gap=5, wb_proxy_url=None, ozon_proxy_url=None):
         ozon = OzonAdapter(gap=gap, proxy=ozon_proxy)
     except (ValueError, TypeError):
         raise MarketError("Не удалось настроить прокси; проверьте WB_PROXY_URL/OZON_PROXY_URL без вывода реквизитов") from None
-    return {"wb": wb, "ozon": ozon, "yandex": YandexMarketAdapter(gap=gap)}
+    return {"wb": wb, "ozon": ozon}

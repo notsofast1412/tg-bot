@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from .models import (CheckLog, NotificationQueue, NotificationState, PriceHistory,
                      ProcessedUpdate, Product, Setting, Tag)
 from paintbot.services.formatting import alert
+from paintbot.marketplaces.links import SUPPORTED_MARKETS
 
 TAGS = {
     "#arton": 400, "#2arton": 750, "#6arton": 2200,
@@ -48,6 +49,13 @@ class Store:
         with self.tx() as s:
             existing = set(s.scalars(select(Tag.name)))
             s.add_all(Tag(name=name, threshold=value * 100) for name, value in TAGS.items() if name not in existing)
+            # Keep legacy products and their history, but stop removed marketplaces.
+            unsupported = select(Product.id).where(Product.marketplace.not_in(SUPPORTED_MARKETS))
+            s.execute(update(Product).where(Product.marketplace.not_in(SUPPORTED_MARKETS)).values(
+                active=False, status="Поддержка площадки прекращена"))
+            s.execute(update(NotificationQueue).where(NotificationQueue.product_id.in_(unsupported),
+                NotificationQueue.state == "pending").values(
+                state="cancelled", error="Поддержка площадки прекращена"))
 
     def recover(self):
         with self.tx() as s:
@@ -109,6 +117,8 @@ class Store:
             if not s.get(Tag, tag_id):
                 raise ValueError("Тег не найден")
             for card in cards:
+                if card.marketplace not in SUPPORTED_MARKETS:
+                    raise ValueError("Поддерживаются только WB и Ozon")
                 if s.scalar(select(Product.id).where(Product.marketplace == card.marketplace, Product.card_id == card.card_id)):
                     skipped += 1
                     continue
@@ -147,6 +157,8 @@ class Store:
             p = s.get(Product, product_id)
             if not p:
                 raise ValueError("Товар не найден")
+            if active and p.marketplace not in SUPPORTED_MARKETS:
+                raise ValueError("Поддержка площадки прекращена")
             p.active = active
             if not active:
                 s.execute(update(NotificationQueue).where(NotificationQueue.product_id == p.id,
@@ -155,6 +167,7 @@ class Store:
     def due(self, now, limit=20):
         with self.tx() as s:
             return list(s.scalars(select(Product).where(Product.active.is_(True), Product.next_check <= now)
+                                  .where(Product.marketplace.in_(SUPPORTED_MARKETS))
                                   .order_by(Product.next_check, Product.id).limit(limit)))
 
     def begin_attempt(self, product_id, interval):
@@ -212,6 +225,8 @@ class Store:
     def claim_notification(self, now):
         with self.tx() as s:
             q = s.scalar(select(NotificationQueue).where(NotificationQueue.state == "pending",
+                         NotificationQueue.product_id.in_(select(Product.id).where(
+                             Product.marketplace.in_(SUPPORTED_MARKETS))),
                          NotificationQueue.next_attempt <= now).order_by(NotificationQueue.id).limit(1))
             if q:
                 q.state = "sending"
@@ -236,6 +251,8 @@ class Store:
             q = s.get(NotificationQueue, queue_id)
             if not q or q.state not in ("uncertain", "failed"):
                 raise ValueError("Нет такого проблемного уведомления")
+            if s.get(Product, q.product_id).marketplace not in SUPPORTED_MARKETS:
+                raise ValueError("Поддержка площадки прекращена")
             q.state, q.next_attempt = "pending", 0
 
     def statistics(self):
@@ -245,7 +262,7 @@ class Store:
             queue = s.scalar(select(func.count()).select_from(NotificationQueue).where(
                 NotificationQueue.state.in_(["pending", "sending", "uncertain", "failed"])))
             markets = {}
-            for market in ("wb", "ozon", "yandex"):
+            for market in SUPPORTED_MARKETS:
                 p = s.scalar(select(Product).where(Product.marketplace == market,
                              Product.last_attempt.is_not(None)).order_by(Product.last_attempt.desc()).limit(1))
                 markets[market] = f"{p.status}" if p else "не проверялся"

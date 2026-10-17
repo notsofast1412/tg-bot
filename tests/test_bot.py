@@ -263,3 +263,18 @@ async def test_filters_history_status_handlers(telegram, store, card, product_id
     for text in ("/list market=wb tag=#arton status=active", f"/history {product_id}", "/status", "/tags", "/settings", "/help"):
         await feed(text)
     assert any(isinstance(m, SendMessage) and "Изменения цены" in m.text for m in session.calls)
+
+
+async def test_article_menu_only_offers_supported_marketplaces(telegram, store):
+    feed, button, session, _ = telegram
+    await feed("➕ Добавить товар")
+    await feed(callback=button("method:article"))
+    menu = next(m for m in reversed(session.calls) if isinstance(m, SendMessage))
+    labels = [b.text for row in menu.reply_markup.inline_keyboard for b in row]
+    assert labels == ["Wildberries", "Ozon", "Отмена"]
+    # Old Telegram messages may still contain a removed marketplace callback.
+    await feed(callback=button("market:wb").replace("market:wb", "market:yandex"))
+    assert "устарела" in session.calls[-1].text
+    assert store.products()[1] == 0
+    await feed(callback=button("market:ozon"))
+    assert "числовой ID" in session.calls[-1].text

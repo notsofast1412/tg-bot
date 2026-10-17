@@ -1,1 +1,1 @@
-from .adapters import OzonAdapter, WildberriesAdapter, YandexMarketAdapter, make_adapters
+from .adapters import OzonAdapter, WildberriesAdapter, make_adapters

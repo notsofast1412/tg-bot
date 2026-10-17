@@ -4,12 +4,12 @@ from dataclasses import replace
 import httpx
 import pytest
 
-from paintbot.marketplaces import WildberriesAdapter, OzonAdapter, YandexMarketAdapter
+from paintbot.marketplaces import WildberriesAdapter, OzonAdapter
 from paintbot.marketplaces.links import MarketError, extract_links, from_article, parse_link
 
 URLS = {"wb": "https://www.wildberries.ru/catalog/123/detail.aspx",
-        "ozon": "https://www.ozon.ru/product/paint-123/", "yandex": "https://market.yandex.ru/product--paint/123"}
-CLASSES = {"wb": WildberriesAdapter, "ozon": OzonAdapter, "yandex": YandexMarketAdapter}
+        "ozon": "https://www.ozon.ru/product/paint-123/"}
+CLASSES = {"wb": WildberriesAdapter, "ozon": OzonAdapter}
 
 
 def html(ref, **overrides):
@@ -46,22 +46,13 @@ def test_reject_unsafe_or_ambiguous_links(url):
 
 
 def test_adjacent_links():
-    assert len(extract_links(URLS["wb"] + URLS["ozon"] + " " + URLS["yandex"])) == 3
+    assert len(extract_links(URLS["wb"] + URLS["ozon"])) == 2
     assert extract_links("не ссылка") == []
 
 
 def test_seller_article_not_fuzzy_searched():
     with pytest.raises(MarketError):
         from_article("ozon", "PAINT-BLACK")
-    ref = from_article("yandex", "abcDEF-123")
-    assert ref.card_id == "offer:abcDEF-123"
-
-
-def test_yandex_variant_identity():
-    a = parse_link(URLS["yandex"] + "?sku=100&uniqueId=20&utm_source=x")
-    b = parse_link(URLS["yandex"] + "?sku=101&uniqueId=20")
-    assert a.card_id != b.card_id
-    assert "utm_source" not in a.url
 
 
 @pytest.mark.parametrize("offers", [

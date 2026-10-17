@@ -16,13 +16,12 @@ from scripts.manage import probe
 URLS = [
     "https://ozon.ru/t/8M08OsF",
     "https://www.wildberries.ru/catalog/29220652/detail.aspx?size=65383223",
-    "https://market.yandex.ru/cc/BKAgAV",
 ]
 
 
 async def verify(config, send_test=False):
     failures = 0
-    print("Маркетплейсы: реальные запросы по трём ссылкам владельца")
+    print("Маркетплейсы: реальные запросы по двум ссылкам владельца")
     failures |= await probe(URLS,
         wb_proxy_url=config.wb_proxy_url.get_secret_value() if config.wb_proxy_url else None,
         ozon_proxy_url=config.ozon_proxy_url.get_secret_value() if config.ozon_proxy_url else None)

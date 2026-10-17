@@ -36,7 +36,8 @@ async def test_explicit_proxy_is_used_only_for_wb_and_does_not_mutate_platform_p
     adapters = make_adapters(wb_proxy_url="http://test-user:test-pass@ru-proxy.example:8080")
     try:
         assert seen[0]["proxy"] == "http://test-user:test-pass@ru-proxy.example:8080"
-        assert seen[1]["proxy"] is None and seen[2]["proxy"] is None
+        assert len(seen) == 2
+        assert seen[1]["proxy"] is None
         assert os.environ.get("HTTPS_PROXY") == before
         with pytest.raises(MarketError) as caught:
             await adapters["wb"].fetch(from_article("wb", "29220652"))

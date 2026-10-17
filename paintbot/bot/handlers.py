@@ -16,7 +16,7 @@ MENU = ["➕ Добавить товар", "📋 Список товаров", "
 HELP = ("Управление доступно только владельцу в личном чате. Группа получает лишь уведомления.\n"
         "/start /help /cancel /list /tags /tagitems #тег /status /check /setgroup /settings\n"
         "/history ID — история, /pause ID и /resume ID — мониторинг товара, /queue — доставки.\n"
-        "/list market=wb tag=#arton status=error — фильтры (wb/ozon/yandex; active/paused/error).\n"
+        "/list market=wb tag=#arton status=error — фильтры (wb/ozon; active/paused/error).\n"
         "Добавление: выберите способ, отправьте ссылки, нажмите «Готово», задайте название и тег, подтвердите. "
         "Можно отправлять ссылки несколькими сообщениями; максимум 50 ссылок в пакете. "
         "Черновик истекает через 15 минут бездействия (по умолчанию), после перезапуска сбрасывается.\n"
@@ -280,10 +280,10 @@ def make_router(store, adapters, monitor, bot, ttl=900):
                 flow.step = "market"
                 await message.answer("Выберите площадку", reply_markup=keyboard([
                     [("Wildberries", "market:wb"), ("Ozon", "market:ozon")],
-                    [("Яндекс Маркет", "market:yandex")], [("Отмена", "cancel")]]))
-            elif action.startswith("market:") and flow.step == "market":
+                    [("Отмена", "cancel")]]))
+            elif action in ("market:wb", "market:ozon") and flow.step == "market":
                 flow.step, flow.data["market"] = "article", action.split(":")[1]
-                await message.answer("Введите ID карточки (WB/Ozon: числовой; Яндекс: product ID либо offer ID). "
+                await message.answer("Введите числовой ID карточки WB/Ozon. "
                     "Артикул продавца без однозначной карточки не подменяется поиском", reply_markup=cancel_keys())
             elif action == "articleretry" and flow.step == "articleconfirm":
                 flow.step = "article"
