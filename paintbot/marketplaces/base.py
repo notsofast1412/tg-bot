@@ -1,6 +1,5 @@
 import asyncio
 import json
-import random
 import ssl
 import time
 from dataclasses import dataclass, field
@@ -38,17 +37,13 @@ class Adapter:
         self.next_request = 0.0
         self.blocked_until = 0
 
-    async def wait_turn(self):
-        if self.blocked_until > time.time():
-            raise MarketError("Площадка запросила паузу после HTTP 429", retry_after=int(self.blocked_until - time.time()) + 1)
-        await asyncio.sleep(max(0, self.next_request - time.monotonic()))
-        self.next_request = time.monotonic() + random.uniform(self.gap, self.gap * 1.5)
-
     async def request(self, url, *, allow_redirect=False):
         async with self.lock:
+            if self.blocked_until > time.time():
+                raise MarketError("Площадка запросила паузу после HTTP 429", retry_after=int(self.blocked_until - time.time()) + 1)
             for attempt in range(2):
-                # Vary request spacing without ever shortening the configured minimum.
-                await self.wait_turn()
+                await asyncio.sleep(max(0, self.next_request - time.monotonic()))
+                self.next_request = time.monotonic() + self.gap
                 try:
                     response = await self.client.get(url)
                 except httpx.RequestError as exc:

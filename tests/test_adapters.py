@@ -115,17 +115,12 @@ async def test_http_method_and_stale_cache():
         await client.aclose()
 
 
-async def test_wb_browser_fetch_never_uses_the_obsolete_http_endpoint():
-    from unittest.mock import AsyncMock
+async def test_wb_html_fallback():
     ref = from_article("wb", "123")
-    def unexpected(request):
-        pytest.fail("WB must use browser page responses, not standalone HTTP requests")
-    report = {'schema': 1, 'page_http': 200, 'same_card_and_size': True,
-              'card_id': '123', 'size': None,
-              'products': [{'id': '123', 'name': 'Краска', 'sizes': [
-                  {'optionId': 456, 'stock_qty': 1, 'price': {'product': 38950}}]}]}
-    async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as client:
-        card = await WildberriesAdapter(client=client, gap=0,
-                                       browser_fetch=AsyncMock(return_value=report)).fetch(ref)
-        assert card.price == 38950
-        assert 'WB browser' in card.source
+    def respond(request):
+        return httpx.Response(200, json={}) if request.url.host == "card.wb.ru" else httpx.Response(200, text=html(ref))
+    client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    try:
+        assert (await WildberriesAdapter(client=client, gap=0).fetch(ref)).price == 38950
+    finally:
+        await client.aclose()
