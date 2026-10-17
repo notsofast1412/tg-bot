@@ -99,3 +99,17 @@ async def test_readiness_timeout_stops_the_browser(native, monkeypatch):
     native.connect.assert_not_awaited()
     native.chrome.terminate.assert_called_once()
     native.chrome.wait.assert_called_once()
+
+
+async def test_native_startup_uses_validated_card_url(native):
+    async with worker.native_context(native.playwright, '/browser', native.profile,
+                                     initial_url=worker.DEFAULT_URL):
+        assert native.launch.call_args.args[0][-1] == worker.DEFAULT_URL
+
+
+async def test_native_startup_rejects_unrelated_url_before_launch(native):
+    with pytest.raises(ValueError):
+        async with worker.native_context(native.playwright, '/browser', native.profile,
+                                         initial_url='https://example.com/'):
+            pytest.fail('Must reject an unrelated startup URL')
+    native.launch.assert_not_called()

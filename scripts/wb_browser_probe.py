@@ -98,16 +98,18 @@ class BrowserError(Exception):
 
 
 @asynccontextmanager
-async def native_context(playwright, executable, profile):
+async def native_context(playwright, executable, profile, initial_url='about:blank'):
     # Start the same ordinary Chrome command used in the successful manual test.
     # The debugging endpoint is ephemeral and bound only to loopback.
+    if initial_url != 'about:blank':
+        card_identity(initial_url)
     with socket.socket() as reservation:
         reservation.bind(('127.0.0.1', 0))
         port = reservation.getsockname()[1]
     chrome = subprocess.Popen([
         executable, '--user-data-dir=' + str(profile), '--lang=ru-RU', '--no-first-run',
         '--no-proxy-server', '--remote-debugging-address=127.0.0.1',
-        '--remote-debugging-port=' + str(port), 'about:blank',
+        '--remote-debugging-port=' + str(port), initial_url,
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     browser = None
     try:
@@ -156,7 +158,7 @@ def browser_lock(root):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-async def probe(url, browser=None):
+async def probe(url, browser=None, startup_url=False):
     from playwright.async_api import async_playwright, TimeoutError as BrowserTimeout
     nm_id, selected_size = card_identity(url)
     root = project_root()
@@ -172,11 +174,16 @@ async def probe(url, browser=None):
     profile = root / ('var/manual-browser-profile' if Path(executable) == managed
                       else 'var/manual-browser-stable-profile')
     profile.mkdir(parents=True, exist_ok=True, mode=0o700)
-    output = {'schema': 1, 'browser': version, 'launch_mode': 'native_cdp', 'card_id': nm_id, 'size': selected_size,
+    output = {'schema': 1, 'browser': version,
+              'launch_mode': 'native_cdp_startup_url' if startup_url else 'native_cdp',
+              'card_id': nm_id, 'size': selected_size,
               'responses': [], 'products': [], 'price_blocks': {}}
     pending = set()
-    async with async_playwright() as playwright, native_context(playwright, executable, profile) as context:
+    async with async_playwright() as playwright, native_context(
+            playwright, executable, profile, initial_url=url if startup_url else 'about:blank') as context:
         try:
+            if startup_url and not context.pages:
+                raise BrowserError('browser_failed')
             page = context.pages[0] if context.pages else await context.new_page()
 
             async def inspect_response(response):
@@ -235,11 +242,24 @@ async def probe(url, browser=None):
 
             page.on('response', on_response)
             try:
-                response = await page.goto(url, wait_until='domcontentloaded', timeout=45000)
-                output['page_http'] = response.status if response else None
-                if response and response.status != 200:
-                    output['error'] = f'http_{response.status}'
-                    if response.status == 429:
+                response = None
+                if startup_url:
+                    # Chrome already navigates from its command-line URL. Observe it;
+                    # do not navigate again or issue substitute API requests. The
+                    # document response may have preceded the CDP attachment.
+                    await page.wait_for_load_state('domcontentloaded', timeout=45000)
+                    status = await page.evaluate(
+                        '() => performance.getEntriesByType("navigation")[0]?.responseStatus ?? null')
+                    output['page_http'] = status if type(status) is int and 100 <= status <= 599 else None
+                    output['document_status_source'] = 'navigation_timing'
+                else:
+                    response = await page.goto(url, wait_until='domcontentloaded', timeout=45000)
+                    output['page_http'] = response.status if response else None
+                if startup_url and output['page_http'] is None:
+                    output['error'] = 'no_product'
+                elif output['page_http'] is not None and output['page_http'] != 200:
+                    output['error'] = f'http_{output["page_http"]}'
+                    if response and response.status == 429:
                         output['retry_after'] = retry_seconds(response.headers.get('retry-after'))
                 else:
                     # h1 can be a rating widget; wait for the actual product JSON instead.
@@ -287,11 +307,13 @@ def main():
     parser.add_argument('url', nargs='?', default=DEFAULT_URL)
     parser.add_argument('--browser')
     parser.add_argument('--machine', action='store_true', help='Compact JSON for the bot worker bridge')
+    parser.add_argument('--startup-url', action='store_true',
+                        help='Diagnostic only: open the card at Chrome startup, without Playwright navigation')
     args = parser.parse_args()
     try:
         card_identity(args.url)
         with browser_lock(project_root()):
-            output = asyncio.run(probe(args.url, args.browser))
+            output = asyncio.run(probe(args.url, args.browser, startup_url=args.startup_url))
     except BrowserError as exc:
         output = {'schema': 1, 'error': str(exc)}
     except ImportError:

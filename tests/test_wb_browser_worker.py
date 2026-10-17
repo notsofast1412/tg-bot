@@ -34,8 +34,8 @@ def browser_page(tmp_path, monkeypatch):
     context = SimpleNamespace(pages=[page], close=AsyncMock())
     native_calls = []
     @asynccontextmanager
-    async def native(playwright, executable, profile):
-        native_calls.append((executable, profile))
+    async def native(playwright, executable, profile, initial_url='about:blank'):
+        native_calls.append((executable, profile, initial_url))
         try:
             yield context
         finally:
@@ -57,6 +57,35 @@ def browser_page(tmp_path, monkeypatch):
     monkeypatch.setattr(worker.shutil, 'which', lambda name: '/usr/bin/google-chrome-stable')
     monkeypatch.setattr(worker.subprocess, 'run', lambda *args, **kwargs: SimpleNamespace(stdout='Chrome test'))
     return SimpleNamespace(api=api, doc=doc, page=page, context=context, native_calls=native_calls, callbacks=callbacks)
+
+
+@pytest.mark.parametrize('status,error', [(200, None), (498, 'http_498'), (None, 'no_product'),
+                                        (True, 'no_product')])
+async def test_startup_url_observes_native_navigation_without_goto(browser_page, status, error):
+    state = browser_page
+    async def loaded(*args, **kwargs):
+        state.callbacks['response'](state.api)
+    state.page.wait_for_load_state = AsyncMock(side_effect=loaded)
+    state.page.evaluate = AsyncMock(return_value=status)
+    result = await worker.probe(worker.DEFAULT_URL, startup_url=True)
+    assert result.get('error') == error
+    assert result['launch_mode'] == 'native_cdp_startup_url'
+    assert result['document_status_source'] == 'navigation_timing'
+    assert state.native_calls[0][2] == worker.DEFAULT_URL
+    state.page.goto.assert_not_awaited()
+    state.context.close.assert_awaited_once()
+    if status == 200 and type(status) is int:
+        assert result['products'][0]['sizes'][0]['price']['product'] == 26300
+
+
+async def test_startup_url_does_not_invent_api_data_when_response_preceded_attachment(browser_page):
+    state = browser_page
+    state.page.wait_for_load_state = AsyncMock()
+    state.page.evaluate = AsyncMock(return_value=200)
+    result = await worker.probe(worker.DEFAULT_URL, startup_url=True)
+    assert result['error'] == 'no_product'
+    assert result['products'] == []
+    state.page.goto.assert_not_awaited()
 
 
 async def test_collects_actual_page_response_and_closes_context(browser_page):
