@@ -49,7 +49,8 @@ systemctl enable paintbot.service paintbot-backup.timer
 systemctl restart paintbot.service
 systemctl start paintbot-backup.timer
 sleep 3
-systemctl is-active --quiet paintbot.service paintbot-browser.service
+systemctl is-active --quiet paintbot.service
+systemctl is-active --quiet paintbot-browser.service
 echo "Code installed: $release"
 echo 'Finish Chrome extension setup in VNC: see docs/WB_BROWSER.md.'
 echo "Backup: $update_dir/before-update.tar.gz"
