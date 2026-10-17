@@ -8,7 +8,7 @@ const product = {id: 518397236, name: 'Краска', totalQuantity: 52, token: 
   {optionId: 716573024, price: {product: 26300, basic: 51600, wallet: 25500}, stocks: [{qty: 52}], payload: 'PRIVATE'}]};
 let listener, navigationListener, nextJob = {id: 'job', url, issued_at: Date.now() / 1000 - 0.1};
 let currentUrl = 'https://www.wildberries.ru/catalog/999/detail.aspx';
-let navigations = [], posts = [], timers = [], reloads = [], trace = [];
+let activations = [], posts = [], timers = [], typedNavigations = [], trace = [], claimedUrls = new Map();
 const context = {URL, AbortSignal, TextDecoder, Uint8Array, atob, crypto: require('node:crypto').webcrypto,
   PAINTBOT_KEY: 'LOCAL_KEY', setInterval() {}, clearTimeout() {},
   setTimeout(fn) {timers.push(fn); return timers.length;},
@@ -16,15 +16,24 @@ const context = {URL, AbortSignal, TextDecoder, Uint8Array, atob, crypto: requir
     onRequestFinished: {addListener(fn) {listener = fn;}},
     onNavigated: {addListener(fn) {navigationListener = fn;}}}},
     tabs: {get: async () => ({url: currentUrl}),
-      update: async (id, value) => {navigations.push([id, value]); currentUrl = value.url;},
-      reload: async id => {reloads.push(id);}}},
+      update: async (id, value) => {assert.equal(value.url, undefined); assert.equal(value.active, true); activations.push(id);},
+      reload: async () => {throw new Error('Browser API reload must not be used');}}},
   fetch: async (endpoint, options) => {
     assert(endpoint.startsWith('http://127.0.0.1:8765/'));
     assert.equal(options.headers.Authorization, 'Bearer LOCAL_KEY');
     if (endpoint.endsWith('/result')) posts.push(JSON.parse(options.body));
     if (endpoint.endsWith('/progress')) trace.push(JSON.parse(options.body));
+    if (endpoint.endsWith('/navigate')) {
+      const value = JSON.parse(options.body);
+      assert.equal(value.url, undefined);
+      currentUrl = claimedUrls.get(value.job_id);
+      typedNavigations.push(currentUrl);
+    }
     const job = nextJob;
-    if (options.method === 'GET') nextJob = null;
+    if (options.method === 'GET') {
+      nextJob = null;
+      if (job) claimedUrls.set(job.id, job.url);
+    }
     return {ok: true, json: async () => options.method === 'GET' ? {job} : {ok: true}};
   }};
 vm.createContext(context);
@@ -33,14 +42,16 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, '../browser-extension/devto
 const tick = () => new Promise(resolve => setImmediate(resolve));
 (async () => {
   await tick(); await tick();
-  assert.equal(navigations.length, 1);
-  assert.equal(navigations[0][1].url, url);
+  assert.equal(activations.length, 1);
+  assert.equal(typedNavigations.length, 1);
+  assert.equal(typedNavigations[0], url);
   // A cancelled/replaced server job must not be silently claimed and lost.
   nextJob = {id: 'replacement-job', url, issued_at: Date.now() / 1000 - 0.01};
   await context.helpers.poll();
-  assert.equal(navigations.length, 1);
-  assert.equal(reloads.length, 1);
-  assert.equal(reloads[0], 7);
+  await tick();
+  assert.equal(activations.length, 2);
+  assert.equal(typedNavigations.length, 2);
+  assert.equal(typedNavigations[1], url);
   navigationListener(url);
   const clean = context.helpers.publicProduct({products: [product]}, '518397236');
   assert.equal(clean.sizes[0].price.product, 26300);
@@ -65,7 +76,6 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
   assert(!JSON.stringify(posts).includes('PRIVATE'));
   assert(!JSON.stringify(posts).includes('LOCAL_KEY'));
   assert(trace.some(e => e.event === 'navigation_requested'));
-  assert(trace.some(e => e.event === 'reload_requested'));
   assert(trace.some(e => e.event === 'navigated'));
   assert(trace.some(e => e.event === 'products_received'));
   assert(!JSON.stringify(trace).includes('PRIVATE'));

@@ -10,6 +10,10 @@ for executable in /usr/bin/google-chrome-stable xvfb-run xauth x11vnc; do
     command -v "$executable" >/dev/null || { echo "Missing: $executable" >&2; exit 1; }
 done
 test -s var/vnc.pass
+if ! command -v xdotool >/dev/null; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y xdotool
+fi
 mkdir -p var/wb-extension .cache .config .pki
 .venv/bin/python - <<'PY'
 import json

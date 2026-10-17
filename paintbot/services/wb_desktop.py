@@ -13,6 +13,7 @@ from aiohttp import web
 
 from paintbot.marketplaces.links import MarketError, parse_link
 from paintbot.marketplaces.wb_browser import KEY_PATH, ROOT, SOURCE, public_product
+from paintbot.services.wb_native_navigation import NativeNavigator
 
 
 class BridgeError(Exception):
@@ -124,7 +125,7 @@ class Broker:
         job['future'].set_result({'schema': 1, 'url': ref.url, 'products': products, 'dest': dest})
 
 
-def application(key, broker=None):
+def application(key, broker=None, navigate=None):
     broker = broker or Broker()
 
     @web.middleware
@@ -136,7 +137,7 @@ def application(key, broker=None):
         extension_origin = re.fullmatch(r'chrome-extension://[a-p]{32}', origin)
         cors = {'Access-Control-Allow-Origin': origin, 'Vary': 'Origin'} if extension_origin else {}
         if request.method == 'OPTIONS':
-            if not extension_origin or request.path not in ('/fetch', '/job', '/result', '/health', '/progress'):
+            if not extension_origin or request.path not in ('/fetch', '/job', '/result', '/health', '/progress', '/navigate'):
                 return web.Response(status=403)
             return web.Response(status=204, headers={**cors,
                 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -164,9 +165,9 @@ def application(key, broker=None):
 
     async def claim(request):
         revision = request.query.get('v', '')
-        if revision != '2':
+        if revision != '3':
             return web.json_response({'job': None, 'reload_extension': True})
-        broker.extension_revision = 2
+        broker.extension_revision = 3
         return web.json_response({'job': broker.claim(request.query.get('session'))})
 
     async def submit(request):
@@ -183,11 +184,39 @@ def application(key, broker=None):
         broker.progress(await request.json())
         return web.json_response({'ok': True})
 
+    async def native_navigation(request):
+        payload = await request.json()
+        job = broker.active
+        if (not isinstance(payload, dict) or not job or job['future'].done()
+                or job['session'] is None or payload.get('job_id') != job['id']
+                or payload.get('session') != job['session']):
+            raise BridgeError('invalid_result')
+        if job.get('navigation_dispatched'):
+            return web.json_response({'ok': True})
+        job['navigation_dispatched'] = True
+        broker.trace.append({'event': 'native_navigation_started'})
+        try:
+            if navigate is None:
+                raise BridgeError('navigation_failed')
+            # Only the URL already validated by /fetch is used. No command text
+            # or caller-supplied URL is accepted from the extension here.
+            await navigate(job['url'])
+        except (Exception, asyncio.CancelledError) as exc:
+            broker.trace.append({'event': 'native_navigation_failed'})
+            if not job['future'].done():
+                job['future'].set_exception(BridgeError('navigation_failed'))
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise BridgeError('navigation_failed') from None
+        broker.trace.append({'event': 'native_navigation_sent'})
+        return web.json_response({'ok': True})
+
     app.router.add_post('/fetch', fetch)
     app.router.add_get('/job', claim)
     app.router.add_post('/result', submit)
     app.router.add_get('/health', health)
     app.router.add_post('/progress', progress)
+    app.router.add_post('/navigate', native_navigation)
     app.router.add_options('/{tail:.*}', health)
     return app
 
@@ -203,14 +232,22 @@ async def desktop():
     if not display or not authority:
         raise RuntimeError('Run this desktop through xvfb-run')
     broker = Broker()
-    runner = web.AppRunner(application(key, broker), access_log=None,
+    environment = {k: v for k, v in os.environ.items() if k not in ('BOT_TOKEN', 'OWNER_ID', 'GROUP_ID')}
+    navigator = NativeNavigator(environment)
+    chrome = None
+
+    async def navigate(url):
+        if chrome is None or chrome.poll() is not None:
+            raise BridgeError('navigation_failed')
+        await navigator.navigate(url, chrome.pid)
+
+    runner = web.AppRunner(application(key, broker, navigate), access_log=None,
                            handler_cancellation=True, shutdown_timeout=2)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
     children = []
-    environment = {k: v for k, v in os.environ.items() if k not in ('BOT_TOKEN', 'OWNER_ID', 'GROUP_ID')}
     try:
         await runner.setup()
         await web.TCPSite(runner, '127.0.0.1', 8765).start()
@@ -229,6 +266,7 @@ async def desktop():
                 'https://www.wildberries.ru/catalog/518397236/detail.aspx?size=716573024'],
                 stdout=log, stderr=log, env=environment)
             children.append(chrome)
+            navigator.next_navigation = time.monotonic() + navigator.gap
             while not stop.is_set():
                 if any(child.poll() is not None for child in children):
                     raise RuntimeError('Chrome/VNC stopped; close other browsers using this profile')

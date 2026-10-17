@@ -21,6 +21,10 @@ for executable in /usr/bin/google-chrome-stable xvfb-run xauth x11vnc; do
     command -v "$executable" >/dev/null || { echo "Missing: $executable" >&2; exit 1; }
 done
 test -s var/vnc.pass
+if ! command -v xdotool >/dev/null; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y xdotool
+fi
 systemctl stop paintbot.service paintbot-backup.timer paintbot-backup.service
 if systemctl cat paintbot-browser.service >/dev/null 2>&1; then
     systemctl stop paintbot-browser.service

@@ -113,7 +113,10 @@ async def test_real_loopback_transport_authentication_and_end_to_end_job(tmp_pat
     key = tmp_path / 'key'
     key.write_text('a' * 64)
     monkeypatch.setattr(wb_browser, 'KEY_PATH', key)
-    runner = web.AppRunner(application(key.read_text()), access_log=None, handler_cancellation=True)
+    navigated = []
+    async def navigate(url):
+        navigated.append(url)
+    runner = web.AppRunner(application(key.read_text(), navigate=navigate), access_log=None, handler_cancellation=True)
     await runner.setup()
     site = web.TCPSite(runner, '127.0.0.1', 0)
     await site.start()
@@ -134,21 +137,29 @@ async def test_real_loopback_transport_authentication_and_end_to_end_job(tmp_pat
             assert health.headers['Access-Control-Allow-Origin'] == origin
             old = await client.get(url + '/job?session=' + SESSION, headers=headers)
             assert old.json()['reload_extension'] is True
-            await client.get(url + '/job?session=' + SESSION + '&v=2', headers=headers)
+            await client.get(url + '/job?session=' + SESSION + '&v=3', headers=headers)
             adapter = WildberriesAdapter(client=client, gap=0)
             pending = asyncio.create_task(adapter.fetch(parse_link(URL)))
             try:
                 for _ in range(100):
-                    response = await client.get(url + '/job?session=' + SESSION + '&v=2', headers=headers)
+                    response = await client.get(url + '/job?session=' + SESSION + '&v=3', headers=headers)
                     job = response.json()['job']
                     if job: break
                     await asyncio.sleep(0.01)
                 assert job
+                invalid_navigation = await client.post(url + '/navigate', json={'job_id': job['id'],
+                    'session': 'wrong'}, headers=headers)
+                assert invalid_navigation.status_code == 503 and not navigated
+                for _ in range(2):
+                    native = await client.post(url + '/navigate', json={'job_id': job['id'],
+                        'session': SESSION, 'url': 'https://evil.test/'}, headers=headers)
+                    assert native.status_code == 200
+                assert navigated == [URL]
                 progress = {'job_id': job['id'], 'session': SESSION, 'event': 'reload_requested',
                             'cookie': 'PRIVATE', 'status': 200}
                 assert (await client.post(url + '/progress', json=progress, headers=headers)).status_code == 200
                 diagnostic = (await client.get(url + '/health', headers=headers)).json()
-                assert diagnostic['extension_revision'] == 2
+                assert diagnostic['extension_revision'] == 3
                 assert diagnostic['trace'][-1] == {'event': 'reload_requested', 'status': 200}
                 assert 'PRIVATE' not in repr(diagnostic)
                 result = {'job_id': job['id'], 'session': SESSION, 'page_url': URL,

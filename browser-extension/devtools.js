@@ -9,12 +9,12 @@ let polling = false;
 let sending = false;
 let timer = null;
 
-async function local(path, data) {
+async function local(path, data, timeout = 5000) {
   const response = await fetch(endpoint + path, {
     method: data === undefined ? "GET" : "POST",
     headers: {Authorization: "Bearer " + PAINTBOT_KEY, "Content-Type": "application/json"},
     body: data === undefined ? undefined : JSON.stringify(data),
-    redirect: "error", cache: "no-store", signal: AbortSignal.timeout(5000)
+    redirect: "error", cache: "no-store", signal: AbortSignal.timeout(timeout)
   });
   if (!response.ok) throw new Error("Local bridge unavailable");
   return response.json();
@@ -126,29 +126,29 @@ chrome.devtools.network.onNavigated.addListener(() => {
   if (active) void progress(active, "navigated");
 });
 
+async function navigate(current) {
+  try {
+    if (active !== current) return;
+    await chrome.tabs.update(tabId, {active: true});
+    if (active !== current) return;
+    await progress(current, "navigation_requested");
+    await local("/navigate", {job_id: current.id, session}, 25000);
+  } catch (_) { await progress(current, "navigation_failed"); }
+}
+
 async function poll() {
   if (polling) return;
   polling = true;
   try {
     if (active && Date.now() / 1000 - active.issued_at > 75) active = null;
-    const {job} = await local("/job?session=" + encodeURIComponent(session) + "&v=2");
+    const {job} = await local("/job?session=" + encodeURIComponent(session) + "&v=3");
     if (job) {
       const url = new URL(job.url);
       if (url.origin !== "https://www.wildberries.ru" || !/^\/catalog\/\d+\/detail\.aspx$/.test(url.pathname)) return;
       clearTimeout(timer);
       const current = active = {...job, products: []};
-      try {
-        const tab = await chrome.tabs.get(tabId);
-        const page = new URL(tab.url);
-        if (page.origin === url.origin && page.pathname === url.pathname &&
-            page.searchParams.get("size") === url.searchParams.get("size")) {
-          await progress(current, "reload_requested");
-          await chrome.tabs.reload(tabId);
-        } else {
-          await progress(current, "navigation_requested");
-          await chrome.tabs.update(tabId, {url: job.url});
-        }
-      } catch (_) { await progress(current, "navigation_failed"); }
+      // Keep the heartbeat polling while native UI navigation is in progress.
+      void navigate(current);
     }
   } catch (_) { /* Retry local connection; no WB requests are retried here. */ }
   finally { polling = false; }

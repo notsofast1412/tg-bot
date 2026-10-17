@@ -25,7 +25,7 @@ async def main():
         print('Extension revision:', revision, flush=True)
         if not connected:
             raise SystemExit('Load the extension and keep DevTools open in the WB tab.')
-        if revision != 2:
+        if revision != 3:
             raise SystemExit('Reload the updated extension, then close and reopen DevTools.')
     adapter = WildberriesAdapter(browser=True)
     try:

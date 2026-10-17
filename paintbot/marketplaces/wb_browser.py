@@ -83,7 +83,7 @@ async def fetch_browser(client, ref, key_path=None):
             'api_refused': 'WB отказал в получении цены самой странице Chrome',
             'rate_limit': 'WB ограничил частоту; следующая проверка отложена',
             'invalid_result': 'Chrome вернул неподтверждённые данные WB',
-            'navigation_failed': 'Расширение не смогло открыть или перезагрузить вкладку Chrome',
+            'navigation_failed': 'Не удалось открыть ссылку через окно Chrome; проверьте xdotool и оставьте одно окно Chrome',
         }
         raise MarketError(messages.get(code, 'Служба браузера WB не подтвердила цену'),
                           retry_after=600 if code == 'rate_limit' else 0)
