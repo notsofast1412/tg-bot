@@ -4,7 +4,6 @@ Run using an isolated environment with playwright installed, from /opt/paintbot.
 """
 import argparse
 import asyncio
-import json
 import os
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -14,8 +13,6 @@ from playwright.async_api import async_playwright, TimeoutError as BrowserTimeou
 
 async def main(full_chromium=False, headed=False):
     os.umask(0o077)
-    metadata = json.loads(Path('/etc/paintbot-ru-proxy.json').read_text())
-    proxy = 'http://' + metadata['proxy'] + ':3128'
     output = Path('var/browser-probe')
     output.mkdir(parents=True, exist_ok=True, mode=0o700)
     failed_hosts = set()
@@ -24,7 +21,7 @@ async def main(full_chromium=False, headed=False):
         print('Браузер:', 'Chromium (полная сборка)' if full_chromium else 'Chromium Headless Shell')
         print('Режим:', 'с окном' if headed else 'headless')
         browser = await p.chromium.launch(
-            headless=not headed, chromium_sandbox=True, proxy={'server': proxy}, **options)
+            headless=not headed, chromium_sandbox=True, args=['--no-proxy-server'], **options)
         try:
             context = await browser.new_context(locale='ru-RU')
             page = await context.new_page()

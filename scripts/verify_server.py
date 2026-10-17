@@ -7,7 +7,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from pydantic import ValidationError
 
-from paintbot.bot.session import ProxyAwareSession
+from paintbot.bot.session import TelegramSession
 from paintbot.config import Config
 from paintbot.database.store import Store
 from paintbot.services.diagnostics import group_access
@@ -22,15 +22,13 @@ URLS = [
 async def verify(config, send_test=False):
     failures = 0
     print("Маркетплейсы: реальные запросы по двум ссылкам владельца")
-    failures |= await probe(URLS,
-        wb_proxy_url=config.wb_proxy_url.get_secret_value() if config.wb_proxy_url else None,
-        ozon_proxy_url=config.ozon_proxy_url.get_secret_value() if config.ozon_proxy_url else None)
+    failures |= await probe(URLS)
     store = Store(config.database_path)
     try:
         group = store.setting("group_id") or config.group_id
     finally:
         store.engine.dispose()
-    bot = Bot(config.bot_token.get_secret_value(), session=ProxyAwareSession())
+    bot = Bot(config.bot_token.get_secret_value(), session=TelegramSession())
     try:
         me = await bot.get_me()
         print(f"Telegram getMe: успешно, bot ID {me.id}")

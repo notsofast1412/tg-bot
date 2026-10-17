@@ -1,17 +1,15 @@
-"""Aiogram transport using HTTPX's documented environment proxy support.
+"""Direct HTTPX transport for text/JSON Telegram API methods."""
+import ssl
 
-Only JSON/text methods are needed by this application. No proxy credentials or
-token-bearing URLs are copied into configuration or error messages.
-"""
 import httpx
 from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramNetworkError
 
 
-class ProxyAwareSession(BaseSession):
+class TelegramSession(BaseSession):
     def __init__(self, client=None, **kwargs):
         super().__init__(**kwargs)
-        self.client = client or httpx.AsyncClient(trust_env=True, follow_redirects=False)
+        self.client = client or httpx.AsyncClient(trust_env=False, verify=ssl.create_default_context(), follow_redirects=False)
 
     async def close(self):
         await self.client.aclose()

@@ -14,10 +14,8 @@ class Config(BaseSettings):
     request_gap_seconds: float = Field(default=5, ge=2, le=60)
     scenario_ttl_seconds: int = Field(default=900, ge=60)
     log_level: str = "INFO"
-    wb_proxy_url: SecretStr | None = None
-    ozon_proxy_url: SecretStr | None = None
 
-    @field_validator("group_id", "wb_proxy_url", "ozon_proxy_url", mode="before")
+    @field_validator("group_id", mode="before")
     @classmethod
     def blank_group(cls, value):
         return None if value == "" else value

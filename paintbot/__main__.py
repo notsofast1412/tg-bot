@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from paintbot.bot.access import OwnerOnly
 from paintbot.bot.handlers import make_router
-from paintbot.bot.session import ProxyAwareSession
+from paintbot.bot.session import TelegramSession
 from paintbot.config import Config
 from paintbot.database.store import Store
 from paintbot.marketplaces import make_adapters
@@ -27,10 +27,8 @@ async def run(config):
         if config.group_id >= 0:
             raise ValueError("GROUP_ID должен быть отрицательным")
         store.setting("group_id", config.group_id)
-    bot = Bot(config.bot_token.get_secret_value(), session=ProxyAwareSession(), default=DefaultBotProperties(parse_mode="HTML"))
-    adapters = make_adapters(config.request_gap_seconds,
-        wb_proxy_url=config.wb_proxy_url.get_secret_value() if config.wb_proxy_url else None,
-        ozon_proxy_url=config.ozon_proxy_url.get_secret_value() if config.ozon_proxy_url else None)
+    bot = Bot(config.bot_token.get_secret_value(), session=TelegramSession(), default=DefaultBotProperties(parse_mode="HTML"))
+    adapters = make_adapters(config.request_gap_seconds)
     monitor = Monitor(store, adapters, config.check_interval_seconds)
     sender = Sender(store, bot)
     dispatcher = Dispatcher()

@@ -4,7 +4,6 @@ Run as paintbot inside xvfb-run, using the separate Playwright environment.
 Never exports cookies or solves challenges automatically.
 """
 import asyncio
-import json
 import os
 from pathlib import Path
 import shutil
@@ -30,7 +29,6 @@ async def main():
     profile = root / 'var/browser-profile'
     profile.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(profile, 0o700)
-    metadata = json.loads(Path('/etc/paintbot-ru-proxy.json').read_text())
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -39,7 +37,7 @@ async def main():
         context = await p.chromium.launch_persistent_context(
             str(profile), channel='chromium', headless=False,
             chromium_sandbox=True, locale='ru-RU', viewport=None,
-            proxy={'server': 'http://' + metadata['proxy'] + ':3128'})
+            args=['--no-proxy-server'])
         context.on('close', lambda *_: stop.set())
         try:
             with (root / 'var/browser-desktop.log').open('a') as log:

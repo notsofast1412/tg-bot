@@ -85,32 +85,5 @@ class OzonAdapter(Adapter):
         raise MarketError("Слишком много перенаправлений короткой ссылки")
 
 
-def validate_marketplace_proxy(value, variable_name):
-    if value is None or not value.strip():
-        return None
-    value = value.strip()
-    try:
-        parsed = urlsplit(value)
-        if parsed.scheme not in ("http", "https") or not parsed.hostname or not parsed.port:
-            raise ValueError()
-        if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
-            raise ValueError()
-    except ValueError:
-        # Exception text and chained errors must never reveal proxy credentials.
-        raise MarketError(f"Некорректный {variable_name}: нужен HTTP(S)-прокси с хостом и портом") from None
-    return value
-
-
-def validate_wb_proxy(value):
-    return validate_marketplace_proxy(value, "WB_PROXY_URL")
-
-
-def make_adapters(gap=5, wb_proxy_url=None, ozon_proxy_url=None):
-    wb_proxy = validate_wb_proxy(wb_proxy_url)
-    ozon_proxy = validate_marketplace_proxy(ozon_proxy_url, "OZON_PROXY_URL")
-    try:
-        wb = WildberriesAdapter(gap=gap, proxy=wb_proxy)
-        ozon = OzonAdapter(gap=gap, proxy=ozon_proxy)
-    except (ValueError, TypeError):
-        raise MarketError("Не удалось настроить прокси; проверьте WB_PROXY_URL/OZON_PROXY_URL без вывода реквизитов") from None
-    return {"wb": wb, "ozon": ozon}
+def make_adapters(gap=5):
+    return {"wb": WildberriesAdapter(gap=gap), "ozon": OzonAdapter(gap=gap)}

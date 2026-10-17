@@ -8,7 +8,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.methods import GetMe, SendMessage
 
-from paintbot.bot.session import ProxyAwareSession
+from paintbot.bot.session import TelegramSession
 from paintbot.config import Config
 from paintbot.marketplaces import OzonAdapter, WildberriesAdapter
 from paintbot.marketplaces.links import MarketError, from_article
@@ -55,7 +55,7 @@ async def test_telegram_transport_serialization_and_api_response():
             return httpx.Response(200, json={"ok":True,"result":{"id":999,"is_bot":True,"first_name":"Test"}})
         return httpx.Response(200, json={"ok":True,"result":{"message_id":1,"date":100,"chat":{"id":1,"type":"private"},"text":"hello"}})
     client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
-    session = ProxyAwareSession(client=client)
+    session = TelegramSession(client=client)
     bot = Bot("999:TEST_TOKEN", session=session)
     try:
         assert (await bot.get_me()).id == 999
@@ -69,7 +69,7 @@ async def test_transport_errors_never_echo_token():
     def respond(r):
         raise httpx.ConnectError(str(r.url))
     client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
-    bot = Bot("999:TEST_TOKEN", session=ProxyAwareSession(client=client))
+    bot = Bot("999:TEST_TOKEN", session=TelegramSession(client=client))
     try:
         with pytest.raises(TelegramNetworkError) as caught:
             await bot.get_me()

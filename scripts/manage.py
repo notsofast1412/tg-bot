@@ -32,10 +32,8 @@ def backup(source, destination):
         raise
 
 
-async def probe(urls, wb_proxy_url=None, ozon_proxy_url=None):
-    adapters = make_adapters(
-        wb_proxy_url=wb_proxy_url if wb_proxy_url is not None else os.environ.get("WB_PROXY_URL"),
-        ozon_proxy_url=ozon_proxy_url if ozon_proxy_url is not None else os.environ.get("OZON_PROXY_URL"))
+async def probe(urls):
+    adapters = make_adapters()
     failures = 0
     try:
         for url in urls:

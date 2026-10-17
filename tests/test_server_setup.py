@@ -45,7 +45,7 @@ async def test_server_verification_does_not_send_unless_explicitly_requested(sto
     bot.get_me.return_value = SimpleNamespace(id=999)
     bot.get_webhook_info.return_value = SimpleNamespace(url="")
     monkeypatch.setattr(verify_server, "Bot", lambda *args, **kwargs: bot)
-    monkeypatch.setattr(verify_server, "ProxyAwareSession", lambda: None)
+    monkeypatch.setattr(verify_server, "TelegramSession", lambda: None)
     monkeypatch.setattr(verify_server, "probe", AsyncMock(return_value=0))
     monkeypatch.setattr(verify_server, "group_access", AsyncMock(return_value=(True, "member")))
     config = Config(_env_file=None, bot_token="999:TEST_TOKEN", owner_id=1,
@@ -63,7 +63,7 @@ async def test_failed_marketplace_probe_is_not_reported_as_success(store, monkey
     bot.get_me.return_value = SimpleNamespace(id=999)
     bot.get_webhook_info.return_value = SimpleNamespace(url="")
     monkeypatch.setattr(verify_server, "Bot", lambda *args, **kwargs: bot)
-    monkeypatch.setattr(verify_server, "ProxyAwareSession", lambda: None)
+    monkeypatch.setattr(verify_server, "TelegramSession", lambda: None)
     monkeypatch.setattr(verify_server, "probe", AsyncMock(return_value=1))
     config = Config(_env_file=None, bot_token="999:TEST_TOKEN", owner_id=1, database_path=store.path)
     assert await verify_server.verify(config) == 1

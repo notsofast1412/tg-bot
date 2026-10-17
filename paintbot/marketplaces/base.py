@@ -1,5 +1,6 @@
 import asyncio
 import json
+import ssl
 import time
 from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
@@ -28,8 +29,8 @@ class Card:
 class Adapter:
     market = ""
 
-    def __init__(self, client=None, gap=5, proxy=None):
-        self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(20), follow_redirects=False, proxy=proxy,
+    def __init__(self, client=None, gap=5):
+        self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(20), follow_redirects=False, trust_env=False, verify=ssl.create_default_context(),
             headers={"User-Agent": "PaintPriceMonitor/1.0 (personal price monitoring)", "Accept-Language": "ru-RU,ru;q=0.9"})
         self.gap = gap
         self.lock = asyncio.Lock()

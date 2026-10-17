@@ -40,7 +40,7 @@ async def test_application_lifecycle_price_to_group_with_fake_transport(store, c
     adapter.fetch.return_value = replace(card, price=38900)
     monkeypatch.setattr(app, "Bot", lambda *args, **kwargs: bot)
     # Do not instantiate an unused real transport through keyword evaluation.
-    monkeypatch.setattr(app, "ProxyAwareSession", lambda: session)
+    monkeypatch.setattr(app, "TelegramSession", lambda: session)
     monkeypatch.setattr(app, "make_adapters", lambda gap, **kwargs: {"wb": adapter})
 
     async def poll(*args, **kwargs):
