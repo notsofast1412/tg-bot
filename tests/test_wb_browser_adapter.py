@@ -197,3 +197,9 @@ async def test_cancel_during_process_creation_still_reaps_worker(worker, monkeyp
     with pytest.raises(asyncio.CancelledError):
         await task
     assert processes[0].returncode == -signal.SIGKILL
+
+
+@pytest.mark.parametrize('status', [498, 500])
+def test_nonstandard_http_error_is_reported_as_http_error(status):
+    with pytest.raises(MarketError, match=f'HTTP {status}'):
+        check_report({'schema': 1, 'error': f'http_{status}'})

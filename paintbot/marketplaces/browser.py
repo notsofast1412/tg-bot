@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import re
 import signal
 
 from .links import MarketError
@@ -28,7 +29,7 @@ def check_report(report):
     if error:
         if not isinstance(error, str):
             raise MarketError('Некорректный статус браузера WB')
-        if error in ('http_401', 'http_403', 'http_429'):
+        if re.fullmatch(r'http_[1-5][0-9]{2}', error):
             value = report.get('retry_after', 600)
             retry = max(600, min(value, 86400)) if error == 'http_429' and type(value) is int else (600 if error == 'http_429' else 0)
             raise MarketError(f"HTTP {error[5:]}: браузер WB получил отказ; получение данных остановлено", retry_after=retry)

@@ -198,7 +198,7 @@ async def probe(url, browser=None):
             try:
                 response = await page.goto(url, wait_until='domcontentloaded', timeout=45000)
                 output['page_http'] = response.status if response else None
-                if response and response.status in (401, 403, 429):
+                if response and response.status != 200:
                     output['error'] = f'http_{response.status}'
                     if response.status == 429:
                         output['retry_after'] = retry_seconds(response.headers.get('retry-after'))
@@ -238,7 +238,7 @@ async def probe(url, browser=None):
             await context.close()
     if not output.get('error') and not output['products']:
         denied = next((item['status'] for item in output['responses']
-                       if item['source_allowed'] and item['status'] in (401, 403, 429)), None)
+                       if item['source_allowed'] and item['status'] >= 400), None)
         output['error'] = f'http_{denied}' if denied else 'no_product'
     return output
 

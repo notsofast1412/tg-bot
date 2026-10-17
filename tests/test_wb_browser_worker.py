@@ -66,15 +66,16 @@ async def test_collects_actual_page_response_and_closes_context(browser_page):
     browser_page.cdp.send.assert_any_await('Network.setCacheDisabled', {'cacheDisabled': True})
 
 
-@pytest.mark.parametrize('case,error', [('doc403', 'http_403'), ('api403', 'http_403'),
+@pytest.mark.parametrize('case,error', [('doc403', 'http_403'), ('doc498', 'http_498'), ('doc500', 'http_500'),
+    ('api403', 'http_403'), ('api498', 'http_498'),
     ('rate_limit', 'http_429'), ('redirect', 'different_card'), ('captcha', 'challenge'),
     ('stale', 'no_product'), ('other_host', 'no_product'), ('timeout', 'timeout')])
 async def test_failed_page_or_response_is_not_accepted(browser_page, case, error):
     state = browser_page
-    if case == 'doc403':
-        state.doc.status = 403
-    elif case == 'api403':
-        state.api.status = 403
+    if case.startswith('doc'):
+        state.doc.status = int(case[3:])
+    elif case.startswith('api'):
+        state.api.status = int(case[3:])
     elif case == 'rate_limit':
         state.api.status = 429
         state.api.headers['retry-after'] = '7200'
@@ -94,7 +95,7 @@ async def test_failed_page_or_response_is_not_accepted(browser_page, case, error
     state.page.goto.assert_awaited_once()
     if case == 'rate_limit':
         assert result['retry_after'] == 7200
-    if case == 'doc403':
+    if case.startswith('doc'):
         state.page.wait_for_timeout.assert_not_awaited()
 
 
