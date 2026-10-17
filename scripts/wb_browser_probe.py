@@ -9,6 +9,7 @@ import asyncio
 from contextlib import contextmanager
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -140,25 +141,51 @@ async def probe(url, browser=None):
             await cdp.send('Network.setCacheDisabled', {'cacheDisabled': True})
 
             async def inspect_response(response):
+                status = None
                 try:
                     parts = urlsplit(response.url)
-                    if (parts.scheme != 'https' or parts.hostname not in ('wildberries.ru', 'www.wildberries.ru')
-                            or parts.path != '/__internal/u-card/cards/v4/detail'):
+                    host = parts.hostname or ''
+                    if (parts.scheme != 'https' or not (host == 'wb.ru' or host.endswith('.wb.ru')
+                            or host == 'wildberries.ru' or host.endswith('.wildberries.ru'))
+                            or 'cards/' not in parts.path or '/detail' not in parts.path):
                         return
-                    status = {'host': parts.hostname, 'path': parts.path, 'status': response.status}
+                    allowed = (host in ('wildberries.ru', 'www.wildberries.ru')
+                               and parts.path == '/__internal/u-card/cards/v4/detail')
+                    status = {'host': host, 'path': parts.path, 'status': response.status,
+                              'source_allowed': allowed}
                     if len(output['responses']) < 30:
                         output['responses'].append(status)
+                    if not allowed:
+                        status['skip_reason'] = 'different_source'
+                        return
                     if response.status == 429:
                         output['retry_after'] = retry_seconds(response.headers.get('retry-after'))
                     if response.status != 200 or len(output['products']) >= 10:
                         return
-                    if float(response.headers.get('age', '0')) > 120:
+                    age = float(response.headers.get('age', '0'))
+                    if not math.isfinite(age) or age < 0:
+                        status['skip_reason'] = 'invalid_cache_age'
                         return
-                    product = public_product(await response.json(), nm_id)
+                    status['age_seconds'] = age
+                    if age > 120:
+                        status['skip_reason'] = 'stale_cache'
+                        return
+                    payload = await response.json()
+                    container = payload.get('data', payload) if isinstance(payload, dict) else None
+                    entries = container.get('products') if isinstance(container, dict) else None
+                    status['products_list'] = isinstance(entries, list)
+                    if isinstance(entries, list):
+                        status['product_count'] = len(entries)
+                        status['matched_requested_id_count'] = sum(
+                            isinstance(entry, dict) and str(entry.get('id')) == nm_id for entry in entries)
+                    product = public_product(payload, nm_id)
+                    status['matched_public_product'] = bool(product)
                     if product and product not in output['products']:
                         output['products'].append(product)
-                except Exception:
+                except Exception as exc:
                     # Never export cookies, headers or raw responses.
+                    if status is not None:
+                        status['read_error'] = type(exc).__name__
                     return
 
             def on_response(response):
@@ -176,11 +203,15 @@ async def probe(url, browser=None):
                     if response.status == 429:
                         output['retry_after'] = retry_seconds(response.headers.get('retry-after'))
                 else:
-                    try:
-                        await page.locator('h1').wait_for(timeout=20000)
-                    except BrowserTimeout:
-                        pass
-                    await page.wait_for_timeout(5000)
+                    # h1 can be a rating widget; wait for the actual product JSON instead.
+                    for _ in range(40):
+                        if output['products']:
+                            await page.wait_for_timeout(1000)
+                            break
+                        if any(item['source_allowed'] and item['status'] in (401, 403, 429)
+                               for item in output['responses']):
+                            break
+                        await page.wait_for_timeout(500)
                     try:
                         final_id, final_size = card_identity(page.url)
                     except ValueError:
@@ -206,7 +237,8 @@ async def probe(url, browser=None):
                 await asyncio.gather(*unfinished, return_exceptions=True)
             await context.close()
     if not output.get('error') and not output['products']:
-        denied = next((item['status'] for item in output['responses'] if item['status'] in (401, 403, 429)), None)
+        denied = next((item['status'] for item in output['responses']
+                       if item['source_allowed'] and item['status'] in (401, 403, 429)), None)
         output['error'] = f'http_{denied}' if denied else 'no_product'
     return output
 

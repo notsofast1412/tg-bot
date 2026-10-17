@@ -49,7 +49,7 @@ def browser_page(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, 'project_root', lambda: tmp_path)
     monkeypatch.setattr(worker.shutil, 'which', lambda name: '/usr/bin/google-chrome-stable')
     monkeypatch.setattr(worker.subprocess, 'run', lambda *args, **kwargs: SimpleNamespace(stdout='Chrome test'))
-    return SimpleNamespace(api=api, doc=doc, page=page, context=context, launch=launch, cdp=cdp)
+    return SimpleNamespace(api=api, doc=doc, page=page, context=context, launch=launch, cdp=cdp, callbacks=callbacks)
 
 
 async def test_collects_actual_page_response_and_closes_context(browser_page):
@@ -96,3 +96,46 @@ async def test_failed_page_or_response_is_not_accepted(browser_page, case, error
         assert result['retry_after'] == 7200
     if case == 'doc403':
         state.page.wait_for_timeout.assert_not_awaited()
+
+
+async def test_changed_wb_route_is_reported_without_accepting_its_prices(browser_page):
+    browser_page.api.url = 'https://www.wildberries.ru/__internal/u-card/cards/v5/detail?nm=518397236&token=PRIVATE'
+    result = await worker.probe(worker.DEFAULT_URL)
+    assert result['error'] == 'no_product'
+    assert result['responses'][0]['source_allowed'] is False
+    assert result['responses'][0]['skip_reason'] == 'different_source'
+    assert result['products'] == []
+    assert 'PRIVATE' not in repr(result)
+
+
+async def test_cache_rejection_has_a_specific_reason(browser_page):
+    browser_page.api.headers['age'] = '121'
+    result = await worker.probe(worker.DEFAULT_URL)
+    assert result['responses'][0]['skip_reason'] == 'stale_cache'
+    assert result['responses'][0]['age_seconds'] == 121
+
+
+async def test_unreadable_api_body_does_not_leak_its_exception(browser_page):
+    browser_page.api.json.side_effect = ValueError('PRIVATE response body')
+    result = await worker.probe(worker.DEFAULT_URL)
+    assert result['error'] == 'no_product'
+    assert result['responses'][0]['read_error'] == 'ValueError'
+    assert 'PRIVATE' not in repr(result)
+
+
+async def test_product_response_arriving_after_old_five_second_wait_is_collected(browser_page):
+    import asyncio
+    browser_page.page.goto.side_effect = None
+    browser_page.page.goto.return_value = browser_page.doc
+    elapsed = [0]
+    async def wait(milliseconds):
+        elapsed[0] += milliseconds
+        if elapsed[0] == 6000:
+            browser_page.callbacks['response'](browser_page.api)
+        await asyncio.sleep(0)
+    browser_page.page.wait_for_timeout.side_effect = wait
+    result = await worker.probe(worker.DEFAULT_URL)
+    assert not result.get('error')
+    assert result['products'][0]['id'] == '518397236'
+    assert elapsed[0] >= 6000
+    browser_page.page.locator.return_value.wait_for.assert_not_awaited()
