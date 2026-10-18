@@ -21,7 +21,8 @@ if systemctl is-active --quiet paintwatch; then
   exit 1
 fi
 apt-get update
-if ! apt-cache policy python3.12-venv | awk '/Candidate:/ {if ($2 != "(none)") found=1} END {exit !found}'; then
+# Keep the parsed label stable on servers with a non-English locale.
+if ! LC_ALL=C apt-cache policy python3.12-venv | awk '/Candidate:/ {if ($2 != "(none)") found=1} END {exit !found}'; then
   echo 'В подключённых репозиториях нет Python 3.12 с venv. Для Ubuntu 22.04 выполните подготовку из docs/ubuntu-22.04.md и повторите установку.' >&2
   exit 1
 fi
