@@ -1,9 +1,0 @@
-{
-  "manifest_version": 3,
-  "name": "Paintbot WB price reader",
-  "version": "1.0.2",
-  "description": "Pass public product responses from this Chrome desktop to the local paintbot.",
-  "permissions": ["tabs"],
-  "host_permissions": ["http://127.0.0.1/*"],
-  "devtools_page": "devtools.html"
-}
