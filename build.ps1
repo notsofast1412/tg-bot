@@ -18,4 +18,5 @@ if ($LASTEXITCODE -ne 0) { throw 'Lint failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Windows build failed.' }
 Copy-Item README.md dist\PaintWatch\README.md -Force
 Copy-Item docs\windows.md dist\PaintWatch\WINDOWS.md -Force
+Copy-Item extension dist\PaintWatch\extension -Recurse -Force
 Write-Host 'Built dist\PaintWatch\PaintWatch.exe. Distribute the entire PaintWatch folder.'

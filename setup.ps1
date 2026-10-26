@@ -8,4 +8,4 @@ if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
 if ($LASTEXITCODE -ne 0) { throw 'Python 3.12 is required.' }
 & .\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements.lock
 if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
-Write-Host 'Ready. Run run.cmd. Microsoft Edge must be installed.'
+Write-Host 'Ready. Run run.cmd, then install and connect the browser extension from Settings.'

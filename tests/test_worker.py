@@ -9,12 +9,36 @@ from paintwatch.worker import Worker
 
 
 class WorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_extension_mode_does_not_launch_controlled_browser(self):
+        from unittest.mock import Mock
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(directory)
+            store.add([parse_ref("196525150", "ozon")], "Paint", "#arton")
+            store.configure({"monitoring": 1})
+            bridge = Mock()
+            collector = AsyncMock()
+            worker = Worker(store, SecretStore(directory), bridge=bridge)
+
+            async def finish(*args):
+                worker.stop()
+
+            with (
+                patch("paintwatch.worker.BrowserCollector", return_value=collector),
+                patch("paintwatch.worker.deliver", side_effect=finish),
+            ):
+                await worker.run()
+            collector.fetch.assert_not_awaited()
+            collector.open.assert_not_awaited()
+            bridge.start.assert_called_once()
+            bridge.close.assert_called_once()
+
     async def test_scheduler_records_price_and_respects_restart_schedule(self):
         with tempfile.TemporaryDirectory() as directory:
             store = Store(directory)
             ref = parse_ref("196525150", "ozon")
             store.add([ref], "Paint", "#arton")
-            store.configure({"monitoring": 1})
+            store.configure({"monitoring": 1, "collector": "playwright"})
             vault = SecretStore(directory)
             collector = AsyncMock()
             collector.fetch.return_value = Snapshot(ref, "Paint", 35000)

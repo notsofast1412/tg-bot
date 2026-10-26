@@ -19,6 +19,36 @@ from paintwatch.store import Store
     "Set PAINTWATCH_TEST_BROWSER for Chromium fixture integration",
 )
 class BrowserSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_extension_visible_price_requires_explicit_payment_label(self):
+        await self.page.set_content(
+            '<h1>Краска</h1><div data-widget="webPrice"><div><span>655 ₽</span><span>с Ozon Картой</span></div><div>718 ₽ обычная цена</div></div>'
+        )
+        script = Path(__file__).resolve().parent.parent / "extension" / "extractor.js"
+        await self.page.add_script_tag(path=str(script))
+        result = await self.page.evaluate(
+            'PaintWatchExtract.visible(document,{market:"ozon"})'
+        )
+        self.assertEqual(result["price"], 65500)
+        self.assertEqual(result["price_kind"], "ozon_card")
+        await self.page.set_content(
+            '<h1>Краска</h1><div data-widget="webPrice">718 ₽ обычная цена</div>'
+        )
+        await self.page.add_script_tag(path=str(script))
+        self.assertIsNone(
+            await self.page.evaluate(
+                'PaintWatchExtract.visible(document,{market:"ozon"})'
+            )
+        )
+        await self.page.set_content(
+            '<h1>Краска</h1><div class="price-block"><div>350 ₽ с WB Кошельком</div><div><span>380 ₽</span><span>без WB Кошелька</span></div></div>'
+        )
+        await self.page.add_script_tag(path=str(script))
+        result = await self.page.evaluate(
+            'PaintWatchExtract.visible(document,{market:"wb"})'
+        )
+        self.assertEqual(result["price"], 38000)
+        self.assertEqual(result["price_kind"], "wb_product")
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.store = Store(self.temp.name)

@@ -65,3 +65,43 @@ class WindowTests(unittest.TestCase):
             self.window.save_settings()
         self.assertEqual(self.store.setting("interval"), "1200")
         self.assertEqual(self.store.setting("monitoring", "0"), "0")
+
+    def test_explicit_paste_and_russian_layout_replace_selection_once(self):
+        from types import SimpleNamespace
+        from paintwatch.ui import ProductDialog
+
+        dialog = ProductDialog(self.window)
+        text = "https://www.ozon.ru/product/196525150/\nhttps://www.wildberries.ru/catalog/29220564/detail.aspx"
+        dialog.urls.clipboard_clear()
+        dialog.urls.clipboard_append(text)
+        dialog.paste_button.invoke()
+        self.assertEqual(dialog.urls.get("1.0", "end-1c"), text)
+        dialog.clipboard.select_all()
+        dialog.clipboard.platform = "win32"
+        result = dialog.clipboard.on_key(
+            SimpleNamespace(state=4, keycode=86, keysym="Cyrillic_em")
+        )
+        self.assertEqual(result, "break")
+        self.assertEqual(dialog.urls.get("1.0", "end-1c"), text)
+        with patch("paintwatch.ui.messagebox.askyesno", return_value=True):
+            dialog.save()
+        self.assertEqual(len(self.store.products()), 2)
+        self.window.root.clipboard_clear()
+
+    def test_paste_in_entry_and_empty_clipboard_leave_existing_text(self):
+        from tkinter import ttk
+        from paintwatch.clipboard import ClipboardActions
+
+        entry = ttk.Entry(self.window.root)
+        actions = ClipboardActions(entry)
+        entry.insert(0, "старое")
+        actions.select_all()
+        entry.clipboard_clear()
+        entry.clipboard_append("новое")
+        actions.menu.invoke(0)
+        self.assertEqual(entry.get(), "новое")
+        entry.clipboard_clear()
+        with patch("paintwatch.clipboard.messagebox.showinfo") as info:
+            actions.paste()
+        info.assert_called_once()
+        self.assertEqual(entry.get(), "новое")

@@ -17,8 +17,8 @@ def data_directory():
 class SecretStore:
     """DPAPI per Windows user. On other platforms secrets stay in RAM only."""
 
-    def __init__(self, directory):
-        self.path = Path(directory) / "telegram.dpapi"
+    def __init__(self, directory, filename="telegram.dpapi"):
+        self.path = Path(directory) / filename
         self.memory = ""
 
     def read(self):
@@ -130,3 +130,33 @@ def autostart(enabled):
                 winreg.DeleteValue(key, "PaintWatch")
             except FileNotFoundError:
                 pass
+
+
+def open_normal_browser(url, browser="chrome"):
+    import subprocess
+    import webbrowser
+
+    if sys.platform == "win32":
+        suffix = (
+            Path("Google/Chrome/Application/chrome.exe")
+            if browser == "chrome"
+            else Path("Microsoft/Edge/Application/msedge.exe")
+        )
+        for base in (
+            os.getenv("PROGRAMFILES"),
+            os.getenv("PROGRAMFILES(X86)"),
+            os.getenv("LOCALAPPDATA"),
+        ):
+            if base and (path := Path(base) / suffix).is_file():
+                subprocess.Popen([str(path), url])
+                return
+    webbrowser.open(url)
+
+
+def extension_directory():
+    base = (
+        Path(sys.executable).parent
+        if getattr(sys, "frozen", False)
+        else Path(__file__).resolve().parent.parent
+    )
+    return base / "extension"

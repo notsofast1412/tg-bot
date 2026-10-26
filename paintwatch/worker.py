@@ -6,13 +6,15 @@ import time
 
 from .browser import BrowserCollector
 from .domain import PriceError
+from .platform import open_normal_browser
 from .telegram import Telegram, TelegramError, deliver
 
 
 class Worker:
-    def __init__(self, store, vault):
+    def __init__(self, store, vault, bridge=None):
         self.store = store
         self.vault = vault
+        self.bridge = bridge
         self.commands = Queue()
         self.events = Queue()
         self.stop_requested = threading.Event()
@@ -46,16 +48,19 @@ class Worker:
         if command == "open":
             p = self.store.product(value)
             if p:
-                await collector.open(p)
+                if self.store.setting("collector", "extension") == "playwright":
+                    await collector.open(p)
+                else:
+                    open_normal_browser(
+                        p["url"], self.store.setting("browser", "chrome")
+                    )
             return "Браузер открыт. После ручной проверки нажмите «Я прошёл проверку»"
         if command == "resume":
             self.store.resume_after_verification(value)
             return "Запрошена повторная проверка выбранного товара"
         if command == "browser":
             await collector.close()
-            return (
-                "Браузеры закрыты. Новая настройка применяется при следующем открытии"
-            )
+            return "Настройка браузера сохранена"
         if command in ("diagnose", "test"):
             token = self.vault.read()
             chat_id = self.store.setting("chat_id")
@@ -81,6 +86,8 @@ class Worker:
         collector = BrowserCollector(self.store.directory, self.store)
         self.store.recover()
         try:
+            if self.bridge:
+                self.bridge.start()
             while not self.stop_requested.is_set():
                 try:
                     command, value, future = self.commands.get_nowait()
@@ -103,7 +110,10 @@ class Worker:
                             )
                         )
                 interval = max(600, int(self.store.setting("interval", "600")))
-                if self.store.setting("monitoring", "0") == "1":
+                if (
+                    self.store.setting("monitoring", "0") == "1"
+                    and self.store.setting("collector", "extension") == "playwright"
+                ):
                     for p in self.store.products():
                         if (
                             self.stop_requested.is_set()
@@ -153,6 +163,8 @@ class Worker:
                 await asyncio.sleep(0.5)
         finally:
             await collector.close()
+            if self.bridge:
+                self.bridge.close()
             while not self.commands.empty():
                 _, _, future = self.commands.get_nowait()
                 if not future.done():

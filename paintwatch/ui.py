@@ -4,8 +4,11 @@ import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from . import __version__
+from .clipboard import ClipboardActions
+from .bridge import BrowserBridge
 from .domain import display_time, money, parse_batch, rub
-from .platform import autostart
+from .platform import SecretStore, autostart, extension_directory
 from .worker import Worker
 
 
@@ -28,7 +31,7 @@ class Window:
     def __init__(self, store, vault, smoke=False):
         self.store, self.vault = store, vault
         self.root = tk.Tk()
-        self.root.title("PaintWatch — мониторинг цен")
+        self.root.title(f"PaintWatch {__version__} — мониторинг цен")
         self.root.geometry("1280x820")
         self.root.minsize(1020, 650)
         self.root.configure(background="#f1f5f9")
@@ -37,7 +40,15 @@ class Window:
         self.tray = None
         self.closing = False
         self.smoke = smoke
-        self.worker = Worker(store, vault)
+        import secrets
+
+        pairing = SecretStore(store.directory, "extension.dpapi")
+        key = pairing.read()
+        if not key:
+            key = secrets.token_urlsafe(32)
+            pairing.save(key)
+        self.bridge = BrowserBridge(store, key)
+        self.worker = Worker(store, vault, bridge=self.bridge)
         self.status = tk.StringVar(value="Мониторинг остановлен")
         self.search = tk.StringVar()
         self.market = tk.StringVar(value="Все площадки")
@@ -130,7 +141,9 @@ class Window:
             state="readonly",
             width=18,
         ).pack(side="left")
-        ttk.Entry(filters, textvariable=self.search, width=35).pack(side="left", padx=8)
+        entry = ttk.Entry(filters, textvariable=self.search, width=35)
+        ClipboardActions(entry)
+        entry.pack(side="left", padx=8)
         ttk.Label(
             filters, text="Поиск по названию, артикулу или тегу", style="Muted.TLabel"
         ).pack(side="left")
@@ -210,15 +223,12 @@ class Window:
         self.interval = tk.StringVar(
             value=str(int(self.store.setting("interval", "600")) // 60)
         )
-        selected = self.store.setting(
-            "browser", "msedge" if sys.platform == "win32" else "chromium"
-        )
+        selected = self.store.setting("browser", "chrome")
         self.browser = tk.StringVar(
             value={
                 "msedge": "Microsoft Edge",
                 "chrome": "Google Chrome",
-                "chromium": "Chromium",
-            }.get(selected, "Microsoft Edge")
+            }.get(selected, "Google Chrome")
         )
         self.dest = tk.StringVar(value=self.store.setting("wb_dest", "-1257786"))
         self.startup = tk.BooleanVar(value=self.store.setting("autostart", "0") == "1")
@@ -232,25 +242,48 @@ class Window:
         ]
         for row, (label, variable) in enumerate(rows):
             ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=8)
-            ttk.Entry(
+            entry = ttk.Entry(
                 form,
                 textvariable=variable,
                 width=58,
                 show="•" if variable is self.token else "",
-            ).grid(row=row, column=1, sticky="w", padx=16)
-        ttk.Label(form, text="Браузер для отдельного профиля").grid(
+            )
+            ClipboardActions(entry)
+            entry.grid(row=row, column=1, sticky="w", padx=16)
+        ttk.Label(form, text="Обычный браузер с расширением").grid(
             row=4, column=0, sticky="w", pady=8
         )
         ttk.Combobox(
             form,
             textvariable=self.browser,
-            values=["Microsoft Edge", "Google Chrome", "Chromium"],
+            values=["Google Chrome", "Microsoft Edge"],
             state="readonly",
             width=36,
         ).grid(row=4, column=1, sticky="w", padx=16)
         ttk.Checkbutton(
             form, text="Запускать при входе в Windows", variable=self.startup
         ).grid(row=5, column=1, sticky="w", pady=12, padx=16)
+        ttk.Label(form, text="Код подключения расширения").grid(
+            row=6, column=0, sticky="w", pady=8
+        )
+        self.pairing_display = tk.StringVar(value=self.bridge.key)
+        ttk.Entry(
+            form,
+            textvariable=self.pairing_display,
+            state="readonly",
+            show="•",
+            width=45,
+        ).grid(row=6, column=1, sticky="w", padx=16)
+        ttk.Button(form, text="Скопировать код", command=self.copy_pairing).grid(
+            row=6, column=2, padx=4
+        )
+        ttk.Button(
+            form, text="Открыть папку расширения", command=self.open_extension
+        ).grid(row=7, column=1, sticky="w", padx=16, pady=6)
+        self.extension_status = tk.StringVar(value="Расширение ещё не подключено")
+        ttk.Label(
+            self.settings_tab, textvariable=self.extension_status, style="Muted.TLabel"
+        ).pack(anchor="w", pady=4)
         try:
             saved = bool(self.vault.read())
         except RuntimeError:
@@ -272,7 +305,7 @@ class Window:
             ttk.Button(bar, text=label, command=action).pack(side="left", padx=(0, 8))
         ttk.Label(
             self.settings_tab,
-            text="В Windows токен защищён DPAPI для текущего пользователя. Пустое поле при сохранении оставляет прежний токен.\nДобавьте бота в группу и разрешите отправлять сообщения. Управление товарами выполняется в этом приложении.\n\nMicrosoft Edge обычно уже установлен в Windows. Для Chromium выполните установку из инструкции.\nПрофили браузеров и база сохраняются в папке пользователя, отдельно от программы.\nМониторинг работает при запущенном приложении и активной Windows; сон и выключение останавливают проверки.",
+            text="Установите папку расширения через chrome://extensions → Режим разработчика → Загрузить распакованное расширение.\nВ его окне вставьте код подключения. Держите обычный Chrome и PaintWatch открытыми.\nПустое поле токена сохраняет прежний токен. В Windows токен защищён DPAPI.\nСон и выключение останавливают мониторинг. CAPTCHA проходится вручную в обычном браузере.",
             wraplength=1060,
             style="Muted.TLabel",
         ).pack(anchor="w", pady=16)
@@ -357,6 +390,14 @@ class Window:
         if selected_event and self.queue_tree.exists(selected_event[0]):
             self.queue_tree.selection_set(selected_event[0])
         active = self.store.setting("monitoring", "0") == "1"
+        import time
+
+        connected = time.time() - int(self.store.setting("extension_seen", "0")) < 120
+        self.extension_status.set(
+            "Расширение подключено"
+            if connected
+            else "Расширение не подключено — откройте обычный Chrome с расширением"
+        )
         self.monitor_button.configure(text="⏸ Остановить" if active else "▶ Запустить")
         self.show_details()
 
@@ -486,9 +527,7 @@ class Window:
                 "Google Chrome": "chrome",
                 "Chromium": "chromium",
             }[self.browser.get()]
-            changed_browser = selected != self.store.setting(
-                "browser", "msedge" if sys.platform == "win32" else "chromium"
-            )
+            changed_browser = selected != self.store.setting("browser", "chrome")
             if sys.platform == "win32":
                 autostart(self.startup.get())
             elif self.startup.get():
@@ -512,6 +551,22 @@ class Window:
         self.vault.clear()
         self.token.set("")
         self.token_status.set("Токен удалён")
+
+    def copy_pairing(self):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.bridge.key)
+        self.status.set(
+            "Код скопирован. Вставьте его в окно расширения PaintWatch в браузере"
+        )
+
+    def open_extension(self):
+        import os
+
+        folder = extension_directory()
+        if sys.platform == "win32" and folder.is_dir():
+            os.startfile(str(folder))
+        else:
+            messagebox.showinfo("Папка расширения", str(folder), parent=self.root)
 
     def retry(self):
         if not self.queue_tree.selection():
@@ -680,6 +735,12 @@ class ProductDialog:
             ).pack(anchor="w")
             self.urls = tk.Text(outer, height=7, wrap="word")
             self.urls.pack(fill="x", pady=8)
+            self.clipboard = ClipboardActions(self.urls)
+            self.paste_button = ttk.Button(
+                outer, text="Вставить из буфера", command=self.clipboard.paste
+            )
+            self.paste_button.pack(anchor="w", pady=(0, 6))
+            self.root.after_idle(self.urls.focus_set)
             ttk.Label(outer, text="Площадка для числовых артикулов:").pack(anchor="w")
             ttk.Combobox(
                 outer,
@@ -703,7 +764,9 @@ class ProductDialog:
             ]
         for label, variable in fields:
             ttk.Label(outer, text=label).pack(anchor="w", pady=(8, 2))
-            ttk.Entry(outer, textvariable=variable, width=70).pack(fill="x")
+            entry = ttk.Entry(outer, textvariable=variable, width=70)
+            ClipboardActions(entry)
+            entry.pack(fill="x")
         ttk.Label(outer, text="Тег").pack(anchor="w", pady=(10, 2))
         ttk.Combobox(
             outer,
