@@ -1,0 +1,4 @@
+httpx==0.28.1
+playwright==1.55.0
+Pillow==11.3.0
+pystray==0.19.5
