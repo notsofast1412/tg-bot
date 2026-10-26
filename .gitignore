@@ -1,12 +1,21 @@
+# Local secrets and runtime state
 .env
 .env.*
 !.env.example
-.venv/
-__pycache__/
-.pytest_cache/
-.ruff_cache/
-*.pyc
+*.pem
+*.key
+*.p12
+*.pfx
 data/
 logs/
-backups/
+profiles/
+
+# Dependencies and generated files
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
 *.egg-info/
+build/
+dist/
