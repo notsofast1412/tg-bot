@@ -1,3 +1,4 @@
+from contextlib import closing
 import json
 import tempfile
 import time
@@ -247,7 +248,9 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(backup.is_file())
         import sqlite3
 
-        with sqlite3.connect(backup) as db:
+        # sqlite3's own context manager ends a transaction but does not close
+        # the connection. Windows cannot remove the temp backup while it is open.
+        with closing(sqlite3.connect(backup)) as db:
             self.assertEqual(db.execute("PRAGMA integrity_check").fetchone()[0], "ok")
         with self.assertRaises(ValueError):
             self.store.backup(self.store.path)
