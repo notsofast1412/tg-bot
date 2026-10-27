@@ -19,6 +19,35 @@ from paintwatch.store import Store
     "Set PAINTWATCH_TEST_BROWSER for Chromium fixture integration",
 )
 class BrowserSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wb_payment_label_can_be_split_between_html_elements(self):
+        await self.page.set_content(
+            '<h1>Краска</h1><div class="price-block"><div><span>350 ₽</span><span>с WB Кошельком</span></div><div><span>380 ₽</span><span>без <b>WB</b> Кошелька</span></div></div>'
+        )
+        await self.page.add_script_tag(
+            path=str(
+                Path(__file__).resolve().parent.parent / "extension" / "extractor.js"
+            )
+        )
+        result = await self.page.evaluate(
+            'PaintWatchExtract.visible(document,{market:"wb"})'
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["price"], 38000)
+
+    async def test_hidden_non_wallet_price_must_not_be_used(self):
+        await self.page.set_content(
+            '<h1>Краска</h1><div class="price-block"><div style="display:none"><span>999 ₽</span><span>без WB Кошелька</span></div><div><span>350 ₽</span><span>с WB Кошельком</span></div></div>'
+        )
+        await self.page.add_script_tag(
+            path=str(
+                Path(__file__).resolve().parent.parent / "extension" / "extractor.js"
+            )
+        )
+        result = await self.page.evaluate(
+            'PaintWatchExtract.visible(document,{market:"wb"})'
+        )
+        self.assertIsNone(result)
+
     async def test_extension_visible_price_requires_explicit_payment_label(self):
         await self.page.set_content(
             '<h1>Краска</h1><div data-widget="webPrice"><div><span>655 ₽</span><span>с Ozon Картой</span></div><div>718 ₽ обычная цена</div></div>'

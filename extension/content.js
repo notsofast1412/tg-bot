@@ -35,7 +35,7 @@
         const delay = /^\d+$/.test(header) ? Number(header) : Math.ceil((Date.parse(header) - Date.now()) / 1000);
         return error('Площадка просит снизить частоту (HTTP 429)', 'rate_limit', Math.max(600, Number.isFinite(delay) ? delay : 600));
       }
-      if ([401, 403, 498].includes(response.status)) return error(`Доступ ограничен (HTTP ${response.status}). Проверьте карточку вручную`, 'access');
+      if ([401, 403, 498].includes(response.status)) return error(`Резервный API ${current.market.toUpperCase()} ограничил доступ (HTTP ${response.status}). Если карточка и цена видны в Chrome, нужна проверка распознавания цены, а не CAPTCHA`, 'access');
       if (!response.ok) return error(`Источник вернул HTTP ${response.status}`);
       if (Number(response.headers.get('age') || 0) > 0) return error('Источник вернул кэшированный ответ');
       const target = new URL(response.url);
@@ -43,7 +43,12 @@
       const text = await response.text();
       if (text.length > 10000000) return error('Ответ слишком большой');
       let raw;
-      try { raw = JSON.parse(text); } catch { return error('API не подтвердил данные; возможна проверка доступа', 'access'); }
+      try { raw = JSON.parse(text); } catch {
+        if (/\/__wbaas\/challenges\/antibot\/|fab_chlg_|captcha-container|id=["']captcha["']|<title>\s*(?:access denied|доступ ограничен|robot or human|проверка браузера)/iu.test(text)) {
+          return error('Резервный API вернул страницу проверки доступа вместо данных карточки', 'access');
+        }
+        return error(`Резервный API ${current.market.toUpperCase()} вернул ответ без данных JSON (HTTP ${response.status}); цена не подтверждена`);
+      }
       const data = current.market === 'ozon' ? parser.cleanOzon(raw, current.article) : parser.cleanWb(raw, current.article);
       return data ? {kind: 'json', data} : error('SKU и тип цены в ответе не подтверждены');
     } catch { return error('Не удалось прочитать цену в браузере'); }

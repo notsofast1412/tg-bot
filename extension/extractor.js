@@ -60,7 +60,12 @@
     if (!root) return null;
     const found = new Set();
     for (const leaf of [root, ...root.querySelectorAll('*')]) {
-      if (leaf.children.length || !label.test(leaf.innerText || '')) continue;
+      const style = leaf.ownerDocument.defaultView.getComputedStyle(leaf);
+      if (!leaf.getClientRects().length || style.visibility === 'hidden' || style.visibility === 'collapse') continue;
+      // Payment labels can contain nested spans/icons. Read their rendered text,
+      // not just childless nodes, and never use display:none prices.
+      const labelText = (leaf.innerText || '').replace(/[\u200B-\u200D\uFEFF]/g, '');
+      if (!label.test(labelText)) continue;
       let node = leaf;
       for (let depth = 0; node && depth < 5 && root.contains(node); depth++, node = node.parentElement) {
         const prices = [...new Set(amounts(node.innerText || ''))];
@@ -86,7 +91,7 @@
       const roots = doc.querySelectorAll('.price-block, .product-page__price-block');
       // Only an explicit non-wallet label confirms this price; no "smallest price" heuristic.
       for (const root of roots) {
-        const price = labelledPrice(root, /без\s*(?:wb\s*)?кошелька/iu);
+        const price = labelledPrice(root, /без\s*(?:(?:wb|вб)\s*)?кошелька/iu);
         if (price !== null) return {kind: 'visible', name: title, price, currency: 'RUB', price_kind: 'wb_product', seller: ''};
       }
     }
