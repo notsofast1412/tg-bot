@@ -15,7 +15,7 @@ function popup(reply) {
   return {elements, calls};
 }
 test('diagnostic button requests a fresh report from the background and selects its text', async () => {
-  const e = popup({report_version: 1, market: 'wb', matched: {price: 26100, price_kind: 'wb_wallet'}, extension_version: '0.4.2'});
+  const e = popup({report_version: 1, market: 'wb', matched: {price: 26100, price_kind: 'wb_wallet'}, extension_version: '0.4.3'});
   await e.elements.diagnose.onclick();
   assert.equal(e.calls[0].type, 'paintwatch.diagnoseActive');
   assert.equal(JSON.parse(e.elements.report.value).matched.price, 26100);

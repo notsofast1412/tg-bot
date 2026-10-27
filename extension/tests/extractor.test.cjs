@@ -27,3 +27,12 @@ test('WB payload contains only the requested SKU and required size fields', () =
   assert.equal(data.products[0].sizes[0].price.product,35000);
   assert.ok(!JSON.stringify(data).includes('secret'));
 });
+
+test('card amount accepts only a complete ruble price rather than a discount or mixed text', () => {
+  assert.equal(parser.cardAmount('261\u00a0₽'), 26100);
+  assert.equal(parser.cardAmount('444 ₽'), 44400);
+  assert.equal(parser.cardAmount('1\u202f234,56 ₽'), 123456);
+  for (const text of ['-15 ₽', 'Хорошая цена', 'Скидка 15 ₽', '261 ₽ 270 ₽', '15%', '261', '0 ₽']) {
+    assert.equal(parser.cardAmount(text), null, text);
+  }
+});

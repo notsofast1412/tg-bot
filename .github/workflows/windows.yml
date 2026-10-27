@@ -37,6 +37,14 @@ jobs:
       - run: ruff format --check .
       - if: runner.os == 'Windows'
         run: python run_app.py --smoke-test --data-dir "$env:RUNNER_TEMP\paintwatch-ui-smoke"
+      - name: Upload browser extension
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PaintWatch-extension
+          path: extension/
+          if-no-files-found: error
+          retention-days: 14
   build:
     needs: tests
     runs-on: windows-2022

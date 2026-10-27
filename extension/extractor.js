@@ -63,39 +63,30 @@
   }
   function struck(node, root) {
     for (; node && root.contains(node); node = node.parentElement) {
-      if (node.matches('del,s,strike,.price-block__old-price') || node.ownerDocument.defaultView.getComputedStyle(node).textDecorationLine.includes('line-through')) return true;
+      if (node.matches('del,s,strike') || node.ownerDocument.defaultView.getComputedStyle(node).textDecorationLine.includes('line-through')) return true;
     }
     return false;
   }
-  const WB_WALLET = '.price-block__wallet-price, [class*="priceBlockWalletPrice-"]';
-  function walletNodes(doc) {
-    const nodes = new Set([...doc.querySelectorAll(WB_WALLET)].filter(node => [...node.classList].some(name => name === 'price-block__wallet-price' || name.startsWith('priceBlockWalletPrice-'))));
-    // Another supplied WB layout puts its card price in a button immediately
-    // before the explicitly named non-card price. Do not search arbitrary red headings.
-    for (const regular of doc.querySelectorAll('[class*="priceBlockFinalPrice-"]')) {
-      if (![...regular.classList].some(name => name.startsWith('priceBlockFinalPrice-')) || !rendered(regular) || struck(regular, doc.documentElement)) continue;
-      const button = regular.previousElementSibling;
-      if (button?.tagName !== 'BUTTON' || !rendered(button)) continue;
-      const headings = [...button.querySelectorAll('h2')].filter(node => rendered(node) && !struck(node, doc.documentElement));
-      const regularPrices = [...new Set(amounts(regular.innerText || ''))];
-      const cardPrices = [...new Set(amounts(button.innerText || ''))];
-      if (headings.length !== 1 || regularPrices.length !== 1 || cardPrices.length !== 1) continue;
-      const headingPrices = [...new Set(amounts(headings[0].innerText || ''))];
-      if (headingPrices.length === 1 && headingPrices[0] === cardPrices[0] && cardPrices[0] <= regularPrices[0]) nodes.add(headings[0]);
-    }
-    return [...nodes];
+  const WB_CARD = '.mo-typography_colors_danger, .mo-typography_color_danger';
+  function cardAmount(text) {
+    const normalized = String(text).replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+    const match = normalized.match(/^(\d[\d\s]*(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?)$/u);
+    return match ? money(match[1]) : null;
   }
-  function wbWalletPrice(doc) {
+  function walletNodes(doc) {
+    return [...doc.querySelectorAll(WB_CARD)];
+  }
+  function wbPriceValues(doc) {
     const found = new Set();
     for (const node of walletNodes(doc)) {
       if (!rendered(node) || struck(node, doc.documentElement)) continue;
-      const prices = [...new Set(amounts(node.innerText || ''))];
-      if (prices.length === 1) found.add(prices[0]);
-    }
-    for (const root of doc.querySelectorAll('.price-block, .product-page__price-block')) {
-      const price = labelledPrice(root, /(?:^|\s)с\s+(?:wb|вб)\s+кошельком/iu);
+      const price = cardAmount(node.innerText || '');
       if (price !== null) found.add(price);
     }
+    return found;
+  }
+  function wbWalletPrice(doc) {
+    const found = wbPriceValues(doc);
     return found.size === 1 ? [...found][0] : null;
   }
   function labelledPrice(root, label) {
@@ -105,7 +96,7 @@
       if (!rendered(leaf) || struck(leaf, root)) continue;
       // Payment labels can contain nested spans/icons. Read their rendered text,
       // not just childless nodes, and never use display:none prices.
-      const labelText = (leaf.innerText || '').replace(/[\u200B-\u200D\uFEFF]/g, '');
+      const labelText = ((leaf.innerText || '') + ' ' + (leaf.getAttribute('aria-label') || '')).replace(/[\u200B-\u200D\uFEFF]/g, '');
       if (!label.test(labelText)) continue;
       let node = leaf;
       for (let depth = 0; node && depth < 5 && root.contains(node); depth++, node = node.parentElement) {
@@ -130,8 +121,8 @@
   }
   function visible(doc, current) {
     const title = doc.querySelector('h1')?.innerText?.trim();
-    if (!title) return null;
     if (current.market === 'ozon') {
+      if (!title) return null;
       const roots = doc.querySelectorAll('[data-widget="webPrice"]');
       if (roots.length !== 1) return null;
       const price = labelledPrice(roots[0], /(?:с\s*)?ozon\s*карт(?:ой|а|е)/iu);
@@ -142,19 +133,29 @@
       }
     } else {
       const price = wbWalletPrice(doc);
-      if (price !== null) return {kind: 'visible', name: title, price, currency: 'RUB', price_kind: 'wb_wallet', seller: wbSeller(doc)};
+      const name = title || (/^\d+$/.test(current.article || '') ? current.article : '');
+      if (price !== null && name) return {kind: 'visible', name, name_source: title ? 'heading' : 'article', price, currency: 'RUB', price_kind: 'wb_wallet', seller: wbSeller(doc)};
     }
     return null;
   }
   function diagnose(doc, current) {
-    const selector = current.market === 'wb' ? '.price-block, .product-page__price-block' : '[data-widget="webPrice"]';
+    const matched = visible(doc, current);
+    const titleFound = Boolean(doc.querySelector('h1')?.innerText?.trim());
+    const cardPrices = current.market === 'wb' ? [...wbPriceValues(doc)] : [];
+    const reason = matched ? null : current.market === 'wb'
+      ? cardPrices.length > 1 ? 'На странице разные подтверждённые цены по WB Карте' : 'Цена по WB Карте не подтверждена'
+      : !titleFound ? 'Не найден заголовок карточки Ozon' : 'Цена по Ozon Карте не подтверждена';
+    const reasonCode = matched ? null : current.market === 'wb'
+      ? cardPrices.length > 1 ? 'ambiguous_card_price' : 'card_price_missing'
+      : !titleFound ? 'title_missing' : 'card_price_missing';
+    const selector = current.market === 'wb' ? WB_CARD : '[data-widget="webPrice"]';
     return {report_version: 1, market: current.market, article: current.article, variant: current.variant,
       price_kind: current.market === 'wb' ? 'wb_wallet' : 'ozon_card',
       walletNodes: current.market === 'wb' ? walletNodes(doc).slice(0, 20).map(node => ({
         tag: node.tagName, className: String(node.className).slice(0, 300), prices: amounts(node.innerText || ''),
-        visible: rendered(node), struck: struck(node, doc.documentElement)
+        visible: rendered(node), struck: struck(node, doc.documentElement), parsedPrice: cardAmount(node.innerText || '')
       })) : [],
-      titleFound: Boolean(doc.querySelector('h1')?.innerText?.trim()), matched: visible(doc, current),
+      titleFound, nameSource: matched?.name_source || (titleFound ? 'heading' : null), cardPrices, reasonCode, reason, matched,
       // No HTML, links, cookies, customer names or delivery addresses leave the page.
       roots: [...doc.querySelectorAll(selector)].slice(0, 5).map(root => ({
         className: String(root.className).slice(0, 200),
@@ -166,7 +167,7 @@
         }))
       }))};
   }
-  const api = {ref, money, amounts, cleanOzon, cleanWb, visible, diagnose};
+  const api = {ref, money, amounts, cardAmount, cleanOzon, cleanWb, visible, diagnose};
   globalThis.PaintWatchExtract = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

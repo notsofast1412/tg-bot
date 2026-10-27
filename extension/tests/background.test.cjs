@@ -28,7 +28,7 @@ function environment({monitoring = true, existing, count = 1, parallelism = 1, h
     chrome: {
       storage: {local: storage(local), session: storage(session)},
       alarms: {onAlarm: listener, create() {}},
-      runtime: {getManifest: () => ({version: '0.4.2'}), onInstalled: listener, onStartup: listener, onMessage: {addListener: fn => { onMessage = fn; }}},
+      runtime: {getManifest: () => ({version: '0.4.3'}), onInstalled: listener, onStartup: listener, onMessage: {addListener: fn => { onMessage = fn; }}},
       tabs: {
         // status intentionally stays loading: images must not hold up price collection.
         get: async id => ({...tabs.get(id), status: 'loading'}),
@@ -171,7 +171,7 @@ test('diagnostics injects the current extractor and works without desktop or a c
   e.context.fetch = async () => { throw new TypeError('Failed to fetch'); };
   const data = await e.message({type: 'paintwatch.diagnoseActive'});
   assert.equal(data.matched.price, 26100);
-  assert.equal(data.extension_version, '0.4.2');
+  assert.equal(data.extension_version, '0.4.3');
   assert.equal(injections.length, 2);
   assert.equal(injections[0].files[0], 'extractor.js');
   assert.equal(injections[0].target.tabId, 81);
