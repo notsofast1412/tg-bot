@@ -8,6 +8,55 @@ from .domain import money, parse_batch, rub
 from .telegram import Telegram, TelegramError
 
 
+BUTTONS = {
+    "📊 Статус": "/status",
+    "🔎 Проверить все": "/scan",
+    "▶️ Запустить": "/run",
+    "⏸ Остановить": "/stop",
+    "📦 Товары": "/products",
+    "🏷 Теги": "/tags",
+    "➕ Добавить товар": "/add",
+    "➕ Добавить тег": "/tag",
+    "🗑 Удалить товар": "/delete",
+    "❓ Помощь": "/help",
+}
+KEYBOARD = {
+    "keyboard": [
+        [{"text": name} for name in list(BUTTONS)[i : i + 2]]
+        for i in range(0, len(BUTTONS), 2)
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+    "input_field_placeholder": "Выберите действие или введите команду",
+}
+MENU_VERSION = "0.4.1"
+COMMANDS = [
+    {"command": command, "description": description}
+    for command, description in (
+        ("start", "Обновить кнопки управления"),
+        ("status", "Состояние мониторинга"),
+        ("scan", "Проверить все цены сейчас"),
+        ("run", "Включить расписание"),
+        ("stop", "Остановить мониторинг и разовый обход"),
+        ("products", "Список товаров"),
+        ("tags", "Список тегов и порогов"),
+        ("add", "Добавить товары: тег и ссылки"),
+        ("tag", "Создать тег с порогом"),
+        ("delete", "Удалить товар по ID с подтверждением"),
+        ("threshold", "Изменить порог товара"),
+        ("pause", "Поставить товар на паузу"),
+        ("resume", "Включить товар"),
+        ("interval", "Изменить интервал в секундах"),
+        ("parallel", "Число параллельных проверок"),
+        ("check", "Запросить проверку по интервалу"),
+        ("verified", "Повторить после ручной проверки доступа"),
+        ("errors", "Текущие проблемы"),
+        ("id", "Мой Telegram ID"),
+        ("help", "Команды и правила уведомлений"),
+    )
+]
+
+
 HELP = """PaintWatch — управление
 /id — ваш Telegram ID
 /status — состояние и нагрузка
@@ -19,12 +68,15 @@ HELP = """PaintWatch — управление
 /check [ID|all] — запросить проверки по текущему интервалу
 /scan — разово проверить все включённые товары сейчас
 /tag #название РУБЛИ — создать тег с порогом
+/tags — список тегов и порогов
 /verified ID — повторить после ручной проверки доступа
 /interval СЕКУНДЫ — интервал, 0 = непрерывный обход
 /parallel ЧИСЛО — 1–32 одновременные проверки
 /threshold ID РУБЛИ — индивидуальный порог
 /errors — последние проблемы
 /help — эта справка
+
+Повторное ценовое уведомление — при снижении ещё минимум на 15 ₽ от последнего отправленного.
 
 Команды работают, пока PaintWatch запущен. Chrome с расширением нужен для сбора цен."""
 
@@ -33,6 +85,7 @@ class TelegramControl:
     def __init__(self, store, vault, bridge=None):
         self.store, self.vault, self.bridge = store, vault, bridge
         self.started = time.time()
+        self.menu_retry_at = 0
 
     def owner(self):
         value = self.store.setting("owner_id")
@@ -67,6 +120,7 @@ class TelegramControl:
         return issues
 
     def execute(self, text):
+        text = BUTTONS.get(text.strip(), text)
         parts = text.split()
         if not parts:
             return HELP
@@ -102,6 +156,21 @@ class TelegramControl:
         if command == "/tag" and len(args) == 2:
             tag = self.store.add_tag(args[0], money(args[1]))
             return f"Создан тег {tag}, порог {rub(money(args[1]))}"
+        if command == "/tags":
+            return (
+                "Теги и пороги:\n"
+                + "\n".join(
+                    f"{tag['name']}: {rub(tag['threshold'])}"
+                    for tag in self.store.tags()
+                )
+                + "\n\n/tag #название 400 — создать тег"
+            )
+        if command == "/add" and not args:
+            return "Добавление товаров:\n/add #тег ссылка [ссылка…]\n\nПример:\n/add #arton https://www.wildberries.ru/catalog/708052242/detail.aspx\n\n/tags — доступные теги"
+        if command == "/tag" and not args:
+            return "Создание тега:\n/tag #название порог_в_рублях\n\nПример: /tag #montana 400"
+        if command == "/delete" and not args:
+            return "Сначала найдите ID товара: /products.\n/delete 12 — показать подтверждение удаления товара №12"
         if command == "/products":
             page = int(args[0]) if args else 1
             if page < 1:
@@ -243,7 +312,33 @@ class TelegramControl:
                 answer = self.execute(text)
             except (ValueError, OverflowError) as error:
                 answer = "Ошибка: " + str(error)[:500]
-            await api.send(uid, answer)
+            await api.send(uid, answer, reply_markup=KEYBOARD)
+
+    async def refresh_menu(self, api, fingerprint):
+        owner = self.owner()
+        if not owner:
+            return
+        key = "telegram_menu_" + fingerprint
+        signature = f"{MENU_VERSION}:{owner}"
+        if self.store.setting(key) == signature:
+            return
+        scope = {"type": "chat", "chat_id": owner}
+        # Override both Telegram's fallback and Russian-localized command lists.
+        for language in ("", "ru"):
+            await api.call(
+                "setMyCommands",
+                {"commands": COMMANDS, "scope": scope, "language_code": language},
+            )
+        await api.call(
+            "setChatMenuButton", {"chat_id": owner, "menu_button": {"type": "commands"}}
+        )
+        # Claim before sending: a lost reply must not duplicate the panel on each restart.
+        self.store.configure({key: signature})
+        await api.send(
+            owner,
+            "Панель PaintWatch обновлена. «Проверить все» запускает разовый обход. Новые ценовые уведомления приходят при дальнейшем снижении минимум на 15 ₽. /help — все команды",
+            reply_markup=KEYBOARD,
+        )
 
     async def alert(self, api):
         owner = self.owner()
@@ -300,6 +395,18 @@ class TelegramControl:
                     if api:
                         await self.poll(api, fingerprint)
                         await self.alert(api)
+                        if time.time() >= self.menu_retry_at:
+                            try:
+                                await self.refresh_menu(api, fingerprint)
+                            except TelegramError as error:
+                                self.menu_retry_at = time.time() + error.delay
+                                self.store.configure(
+                                    {
+                                        "telegram_menu_error": f"Не удалось обновить меню: {error}"
+                                    }
+                                )
+                            else:
+                                self.store.configure({"telegram_menu_error": ""})
                         self.store.configure({"telegram_control_error": ""})
                 except (TelegramError, ValueError, RuntimeError) as error:
                     self.store.configure({"telegram_control_error": str(error)[:400]})

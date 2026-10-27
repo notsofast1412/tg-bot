@@ -3,6 +3,7 @@ import json
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from paintwatch.browser import check_response
 from paintwatch.domain import PriceError, Snapshot, money, parse_batch, parse_ref
@@ -150,6 +151,150 @@ class StoreTests(unittest.TestCase):
             now,
         )
 
+    def sent(self, now=1000):
+        event = self.store.queue()[0]
+        with patch("time.time", return_value=now):
+            claimed = self.store.claim_notification(event["id"])
+            self.assertIsNotNone(claimed)
+            self.store.delivery(event["id"], "sent")
+        return event["id"]
+
+    def test_further_drop_uses_cumulative_15_rubles_and_includes_exact_boundary(self):
+        self.record(35000)
+        self.sent()
+        for price in (34900, 34000, 33501):
+            self.record(price, 1001)
+            self.assertEqual(len(self.store.queue()), 1)
+        self.record(33500, 1002)
+        self.assertEqual(len(self.store.queue()), 2)
+        self.assertEqual(self.store.queue()[0]["previous_price"], 35000)
+        self.sent(1002)
+        self.record(32100, 1003)
+        self.assertEqual(len(self.store.queue()), 2)
+        self.record(32000, 1004)
+        self.record(32000, 1005)
+        self.assertEqual(len(self.store.queue()), 3)
+        self.assertEqual(self.store.queue()[0]["previous_price"], 33500)
+
+    def test_new_threshold_crossing_still_alerts_and_unchanged_tag_does_not_reset_anchor(
+        self,
+    ):
+        self.record(35000)
+        self.sent()
+        self.record(34000, 1001)
+        self.store.edit_tag("#arton", 40000)
+        self.assertEqual(self.store.product(self.pid)["alert_price"], 35000)
+        self.record(33500, 1002)
+        self.sent(1002)
+        self.record(40000, 1003)
+        self.assertIsNone(self.store.product(self.pid)["alert_price"])
+        self.record(39999, 1004)
+        self.assertIsNone(self.store.queue()[0]["previous_price"])
+        self.assertEqual(self.store.queue()[0]["state"], "pending")
+
+    def test_rise_below_threshold_does_not_reset_the_last_notified_price(self):
+        self.record(35000)
+        self.sent()
+        self.record(33500, 1001)
+        self.sent(1001)
+        for price in (35000, 34900, 33500, 32001):
+            self.record(price, 1002)
+        self.assertEqual(len(self.store.queue()), 2)
+        self.record(32000, 1003)
+        self.assertEqual(len(self.store.queue()), 3)
+
+    def test_unsent_drops_coalesce_and_use_the_actual_claimed_price(self):
+        self.record(35000)
+        for price in (33000, 31500):
+            self.record(price, 1001)
+        self.assertEqual(len(self.store.queue()), 1)
+        self.assertIsNone(self.store.product(self.pid)["alert_price"])
+        self.sent(1001)
+        self.assertEqual(self.store.queue()[0]["price"], 31500)
+        self.assertEqual(self.store.product(self.pid)["alert_price"], 31500)
+        self.record(30100, 1002)
+        self.assertEqual(len(self.store.queue()), 1)
+        self.record(30000, 1003)
+        self.assertEqual(len(self.store.queue()), 2)
+
+    def test_unknown_and_failed_prices_do_not_advance_the_repeat_baseline(self):
+        self.record(35000)
+        self.sent()
+        self.store.failure(self.pid, PriceError("No data"), 600, 1001)
+        self.store.record(
+            self.pid,
+            Snapshot(self.ref, "Paint", None, seller="shop", issue="No price"),
+            600,
+            1002,
+        )
+        self.assertEqual(self.store.product(self.pid)["alert_price"], 35000)
+        self.record(33500, 1003)
+        self.assertEqual(len(self.store.queue()), 2)
+
+    def test_pending_repeat_is_cancelled_if_price_recovers_before_send(self):
+        self.record(35000)
+        self.sent()
+        self.record(33500, 1001)
+        repeat = self.store.queue()[0]
+        self.record(33501, 1002)
+        self.assertEqual(self.store.queue()[0]["state"], "cancelled")
+        with patch("time.time", return_value=1002):
+            self.assertIsNone(self.store.claim_notification(repeat["id"]))
+        self.assertEqual(self.store.product(self.pid)["alert_price"], 35000)
+        self.record(33500, 1003)
+        self.assertEqual(self.store.queue()[0]["state"], "pending")
+
+    def test_further_drop_during_send_is_planned_after_successful_delivery(self):
+        self.record(35000)
+        self.sent()
+        self.record(33500, 1001)
+        repeat = self.store.queue()[0]
+        with patch("time.time", return_value=1001):
+            self.assertIsNotNone(self.store.claim_notification(repeat["id"]))
+            self.record(32000, 1001)
+            self.assertEqual(len(self.store.queue()), 2)
+            self.store.delivery(repeat["id"], "sent")
+        self.assertEqual(len(self.store.queue()), 3)
+        self.assertEqual(self.store.queue()[0]["previous_price"], 33500)
+
+    def test_rebased_rule_is_not_overwritten_by_an_old_send_in_flight(self):
+        self.record(37000)
+        event = self.store.queue()[0]
+        with patch("time.time", return_value=1000):
+            self.store.claim_notification(event["id"])
+            self.record(35000)
+            self.store.edit_tag("#arton", 50000)
+            self.store.delivery(event["id"], "sent")
+        self.assertEqual(self.store.product(self.pid)["alert_price"], 35000)
+        self.assertEqual(len(self.store.queue()), 1)
+        self.record(33500, 1001)
+        self.assertEqual(len(self.store.queue()), 2)
+
+    def test_repeat_baseline_survives_restart(self):
+        self.record(35000)
+        self.sent()
+        self.store = Store(self.temp.name)
+        self.record(33500, 1001)
+        self.assertEqual(len(self.store.queue()), 2)
+        self.assertEqual(self.store.queue()[0]["previous_price"], 35000)
+
+    def test_v3_migration_adds_quiet_baseline_without_replaying_legacy_events(self):
+        self.record(35000)
+        self.sent()
+        self.record(34000, 1001)
+        with self.store.db() as db:
+            db.execute("ALTER TABLE products DROP COLUMN alert_price")
+            db.execute("ALTER TABLE outbox DROP COLUMN previous_price")
+            db.execute("PRAGMA user_version=3")
+        self.store = Store(self.temp.name)
+        self.assertEqual(self.store.product(self.pid)["alert_price"], 34000)
+        self.assertEqual(len(self.store.queue()), 1)
+        self.record(32501, 1002)
+        self.assertEqual(len(self.store.queue()), 1)
+        self.record(32500, 1003)
+        self.assertEqual(len(self.store.queue()), 2)
+        self.assertTrue(list((self.store.directory / "backups").glob("*.sqlite3")))
+
     def test_seed_idempotence_and_duplicate_products(self):
         self.assertEqual(len(self.store.tags()), 16)
         self.store.edit_tag("#arton", 45000)
@@ -270,6 +415,8 @@ class StoreTests(unittest.TestCase):
         with self.store.db() as db:
             db.execute("DROP TABLE check_jobs")
             db.execute("DROP TABLE manual_checks")
+            db.execute("ALTER TABLE products DROP COLUMN alert_price")
+            db.execute("ALTER TABLE outbox DROP COLUMN previous_price")
             db.execute("PRAGMA user_version=1")
         migrated = Store(self.temp.name)
         self.assertEqual(migrated.product(self.pid)["price"], 35000)
@@ -277,7 +424,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(migrated.history(self.pid)), 1)
         self.assertEqual(len(migrated.queue()), 1)
         with migrated.db() as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 4)
             self.assertEqual(
                 db.execute("SELECT COUNT(*) FROM check_jobs").fetchone()[0], 0
             )
@@ -296,10 +443,12 @@ class StoreTests(unittest.TestCase):
         job = BrowserBridge(self.store, "fixture").job()
         with self.store.db() as db:
             db.execute("DROP TABLE manual_checks")
+            db.execute("ALTER TABLE products DROP COLUMN alert_price")
+            db.execute("ALTER TABLE outbox DROP COLUMN previous_price")
             db.execute("PRAGMA user_version=2")
         migrated = Store(self.temp.name)
         with migrated.db() as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 4)
             self.assertEqual(
                 db.execute("SELECT lease FROM check_jobs").fetchone()[0], job["lease"]
             )

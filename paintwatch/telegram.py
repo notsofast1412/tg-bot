@@ -61,13 +61,14 @@ class Telegram:
             raise TelegramError("Бот не может писать в выбранную группу")
         return f"Связь проверена: @{me.get('username', 'бот')}, группа «{chat.get('title', '')}»"
 
-    async def send(self, chat_id, text):
+    async def send(self, chat_id, text, reply_markup=None):
         return await self.call(
             "sendMessage",
             {
                 "chat_id": chat_id,
                 "text": text[:4000],
                 "link_preview_options": {"is_disabled": True},
+                **({"reply_markup": reply_markup} if reply_markup is not None else {}),
             },
         )
 
@@ -81,7 +82,14 @@ def notification(event):
         if event["market"] == "ozon"
         else "Wildberries — без WB Кошелька"
     )
-    return f"🔻 Цена ниже порога!\n\n{event['name'][:250]}\n{market}\nЦена: {rub(event['current_price'])}\nПорог: {rub(event['threshold'])}\nТег: {event['tag']}\nПроверено: {display_time(event['last_success'])}\nСобытие №{event['id']}\n\n{event['url']}"
+    previous = event.get("previous_price")
+    change = (
+        f"Ранее: {rub(previous)} · Снижение: {rub(previous - event['current_price'])}\n"
+        if previous is not None
+        else ""
+    )
+    title = "🔻 Цена снизилась ещё!" if previous is not None else "🔻 Цена ниже порога!"
+    return f"{title}\n\n{event['name'][:250]}\n{market}\nЦена: {rub(event['current_price'])}\n{change}Порог: {rub(event['threshold'])}\nТег: {event['tag']}\nПроверено: {display_time(event['last_success'])}\nСобытие №{event['id']}\n\n{event['url']}"
 
 
 async def deliver(store, vault):

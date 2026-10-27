@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from paintwatch.bridge import BrowserBridge
-from paintwatch.control import TelegramControl
+from paintwatch.control import BUTTONS, COMMANDS, KEYBOARD, TelegramControl
 from paintwatch.domain import PriceError, parse_ref
 from paintwatch.platform import SecretStore
 from paintwatch.store import Store
@@ -123,6 +123,85 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("осталось 1", self.control.execute("/status"))
         self.control.execute("/stop")
         self.assertFalse(self.bridge.status()["monitoring"])
+
+    async def test_keyboard_matches_actions_and_only_owner_gets_it(self):
+        self.api.call.return_value = [
+            self.update(1, "🔎 Проверить все", uid=456),
+            self.update(2, "📊 Статус"),
+        ]
+        await self.control.poll(self.api, "fixture")
+        self.api.send.assert_awaited_once()
+        self.assertEqual(self.api.send.call_args.args[0], 123)
+        self.assertEqual(self.api.send.call_args.kwargs["reply_markup"], KEYBOARD)
+        labels = [button["text"] for row in KEYBOARD["keyboard"] for button in row]
+        self.assertEqual(labels, list(BUTTONS))
+        self.assertIn("/tag", self.control.execute("➕ Добавить тег"))
+        self.assertIn("/add", self.control.execute("➕ Добавить товар"))
+        self.assertIn("/products", self.control.execute("🗑 Удалить товар"))
+        self.assertIn("#arton", self.control.execute("🏷 Теги"))
+        self.control.execute("▶️ Запустить")
+        self.assertEqual(self.store.setting("monitoring"), "1")
+        self.control.execute("⏸ Остановить")
+        self.assertEqual(self.store.setting("monitoring"), "0")
+
+    async def test_menu_updates_once_per_version_owner_and_bot_with_private_chat_scope(
+        self,
+    ):
+        await self.control.refresh_menu(self.api, "fixture")
+        await self.control.refresh_menu(self.api, "fixture")
+        self.assertEqual(self.api.call.await_count, 3)
+        calls = self.api.call.call_args_list
+        for call in calls[:2]:
+            self.assertEqual(call.args[0], "setMyCommands")
+            self.assertEqual(call.args[1]["scope"], {"type": "chat", "chat_id": 123})
+            self.assertEqual(call.args[1]["commands"], COMMANDS)
+        self.assertIn("scan", {c["command"] for c in COMMANDS})
+        self.assertIn("tag", {c["command"] for c in COMMANDS})
+        self.assertEqual(calls[2].args[0], "setChatMenuButton")
+        self.api.send.assert_awaited_once()
+        self.assertEqual(self.api.send.call_args.kwargs["reply_markup"], KEYBOARD)
+        self.store.configure({"owner_id": 456})
+        await self.control.refresh_menu(self.api, "fixture")
+        self.assertEqual(self.api.send.call_args.args[0], 456)
+
+    async def test_menu_is_not_published_without_owner_and_failure_can_retry(self):
+        self.store.configure({"owner_id": ""})
+        await self.control.refresh_menu(self.api, "fixture")
+        self.api.call.assert_not_awaited()
+        self.store.configure({"owner_id": 123})
+        self.api.call.side_effect = TelegramError("Rejected", delay=1)
+        with self.assertRaises(TelegramError):
+            await self.control.refresh_menu(self.api, "fixture")
+        self.assertEqual(self.store.setting("telegram_menu_fixture"), "")
+        self.api.call.side_effect = None
+        await self.control.refresh_menu(self.api, "fixture")
+        self.api.send.assert_awaited_once()
+
+    async def test_optional_menu_failure_does_not_delay_commands_or_alerts(self):
+        self.control.vault.save("123456789:" + "A" * 35)
+        self.control.poll = AsyncMock()
+        self.control.alert = AsyncMock()
+        self.control.refresh_menu = AsyncMock(
+            side_effect=TelegramError("Menu unavailable", delay=73)
+        )
+        pauses = []
+
+        async def pause(delay):
+            pauses.append(delay)
+            if len(pauses) == 2:
+                raise asyncio.CancelledError
+
+        with (
+            patch("paintwatch.control.Telegram", return_value=self.api),
+            patch("asyncio.sleep", side_effect=pause),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await self.control.run()
+        self.assertEqual(pauses, [2, 2])
+        self.assertEqual(self.control.poll.await_count, 2)
+        self.assertEqual(self.control.alert.await_count, 2)
+        self.control.refresh_menu.assert_awaited_once()
+        self.api.close.assert_awaited_once()
 
     async def test_interval_and_parallel_changes_keep_market_cooldown(self):
         self.control.execute("/add #arton https://www.ozon.ru/product/1/")

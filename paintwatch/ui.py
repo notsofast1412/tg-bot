@@ -241,7 +241,7 @@ class Window:
     def _tags(self):
         ttk.Label(
             self.tags_tab,
-            text="Уведомление срабатывает при цене строго ниже порога. Изменение порога само по себе не вызывает рассылку.",
+            text="Уведомление — при цене ниже порога; повторное — при снижении ещё минимум на 15 ₽ от последнего отправленного. Изменение порога само по себе не вызывает рассылку.",
             wraplength=1050,
         ).pack(anchor="w", pady=(0, 12))
         self.tags_tree = self._table(
@@ -476,6 +476,7 @@ class Window:
         )
         self.telegram_status.set(
             self.store.setting("telegram_control_error")
+            or self.store.setting("telegram_menu_error")
             or "ЛС: сохраните токен, отправьте боту /id, укажите Ваш ID. Команды: /help"
         )
         self.scan_status.set(

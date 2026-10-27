@@ -8,6 +8,8 @@ import time
 
 from .domain import TAGS, PriceError
 
+REPEAT_DROP = 1500  # kopecks; cumulative decrease from the last confirmed notification
+
 
 class Store:
     def __init__(self, directory):
@@ -16,9 +18,9 @@ class Store:
         self.path = self.directory / "prices.sqlite3"
         with self.db() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3):
+            if version not in (0, 1, 2, 3, 4):
                 raise RuntimeError("Эта база создана другой версией программы")
-            if version in (1, 2):
+            if version in (1, 2, 3):
                 self.backup()
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -32,7 +34,7 @@ class Store:
                     below INTEGER,generation INTEGER NOT NULL DEFAULT 0,failures INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL DEFAULT 'Ожидает проверки',issue TEXT NOT NULL DEFAULT '',
                     seller TEXT NOT NULL DEFAULT '',color TEXT NOT NULL DEFAULT '',
-                    volume TEXT NOT NULL DEFAULT '',pack TEXT NOT NULL DEFAULT '',
+                    volume TEXT NOT NULL DEFAULT '',pack TEXT NOT NULL DEFAULT '',alert_price INTEGER,
                     UNIQUE(market,article,variant)
                 );
                 CREATE TABLE IF NOT EXISTS history(
@@ -48,7 +50,7 @@ class Store:
                     generation INTEGER NOT NULL,price INTEGER NOT NULL,threshold INTEGER NOT NULL,
                     state TEXT NOT NULL DEFAULT 'pending',created_at INTEGER NOT NULL,
                     next_try INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,
-                    error TEXT NOT NULL DEFAULT '',UNIQUE(product_id,generation)
+                    error TEXT NOT NULL DEFAULT '',previous_price INTEGER,UNIQUE(product_id,generation)
                 );
                 CREATE INDEX IF NOT EXISTS checks_product ON checks(product_id,checked_at);
                 CREATE INDEX IF NOT EXISTS history_product ON history(product_id,observed_at);
@@ -64,8 +66,21 @@ class Store:
                     product_id INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
                     request TEXT NOT NULL
                 );
-                PRAGMA user_version=3;
             """)
+            db.execute("BEGIN IMMEDIATE")
+            if version in (1, 2, 3):
+                for table, column in (
+                    ("products", "alert_price"),
+                    ("outbox", "previous_price"),
+                ):
+                    if column not in {
+                        r["name"] for r in db.execute(f"PRAGMA table_info({table})")
+                    }:
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} INTEGER")
+                # Earlier versions did not persist the actual price used by sendMessage.
+                # Start quietly at the last known price instead of guessing that price.
+                db.execute("UPDATE products SET alert_price=price WHERE below=1")
+            db.execute("PRAGMA user_version=4")
             db.executemany("INSERT OR IGNORE INTO tags VALUES(?,?)", TAGS)
 
     @contextmanager
@@ -184,7 +199,7 @@ class Store:
 
     def _rebase(self, db, pid):
         db.execute(
-            "UPDATE products SET below=CASE WHEN price IS NULL THEN NULL ELSE price < COALESCE(custom_threshold,(SELECT threshold FROM tags WHERE name=products.tag)) END WHERE id=?",
+            "UPDATE products SET below=CASE WHEN price IS NULL THEN NULL ELSE price < COALESCE(custom_threshold,(SELECT threshold FROM tags WHERE name=products.tag)) END,alert_price=CASE WHEN price < COALESCE(custom_threshold,(SELECT threshold FROM tags WHERE name=products.tag)) THEN price ELSE NULL END,generation=generation+1 WHERE id=?",
             (pid,),
         )
         db.execute(
@@ -206,6 +221,12 @@ class Store:
 
     def edit_tag(self, name, threshold):
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            old = db.execute(
+                "SELECT threshold FROM tags WHERE name=?", (name,)
+            ).fetchone()
+            if not old or old["threshold"] == threshold:
+                return
             db.execute("UPDATE tags SET threshold=? WHERE name=?", (threshold, name))
             for row in db.execute(
                 "SELECT id FROM products WHERE tag=? AND custom_threshold IS NULL",
@@ -328,30 +349,23 @@ class Store:
                 )
                 return
             below = snapshot.price < p["threshold"]
-            generation = p["generation"]
             if snapshot.price != p["price"]:
                 db.execute(
                     "INSERT INTO history(product_id,price,observed_at,source) VALUES(?,?,?,?)",
                     (pid, snapshot.price, now, snapshot.source),
                 )
-            if below and p["below"] != 1:
-                generation += 1
-                db.execute(
-                    "INSERT OR IGNORE INTO outbox(product_id,generation,price,threshold,created_at) VALUES(?,?,?,?,?)",
-                    (pid, generation, snapshot.price, p["threshold"], now),
-                )
-            elif not below:
+            if not below:
                 db.execute(
                     "UPDATE outbox SET state='cancelled',error='Цена больше не ниже порога' WHERE product_id=? AND state IN ('pending','blocked')",
                     (pid,),
                 )
             db.execute(
-                "UPDATE products SET name=CASE WHEN name=article THEN ? ELSE name END,price=?,below=?,generation=?,last_success=?,last_attempt=?,next_check=?,failures=0,status='Проверено',issue='',seller=?,color=CASE WHEN color='' THEN ? ELSE color END,volume=CASE WHEN volume='' THEN ? ELSE volume END,pack=CASE WHEN pack='' THEN ? ELSE pack END WHERE id=?",
+                "UPDATE products SET name=CASE WHEN name=article THEN ? ELSE name END,price=?,below=?,alert_price=CASE WHEN ? THEN alert_price ELSE NULL END,last_success=?,last_attempt=?,next_check=?,failures=0,status='Проверено',issue='',seller=?,color=CASE WHEN color='' THEN ? ELSE color END,volume=CASE WHEN volume='' THEN ? ELSE volume END,pack=CASE WHEN pack='' THEN ? ELSE pack END WHERE id=?",
                 (
                     snapshot.name,
                     snapshot.price,
                     int(below),
-                    generation,
+                    int(below),
                     now,
                     now,
                     now + interval,
@@ -362,6 +376,50 @@ class Store:
                     pid,
                 ),
             )
+
+            self._plan_alert(db, pid, now, initial=below and p["below"] != 1)
+
+    def _plan_alert(self, db, pid, now, initial=False):
+        p = db.execute(
+            "SELECT p.*,COALESCE(p.custom_threshold,t.threshold) threshold FROM products p JOIN tags t ON t.name=p.tag WHERE p.id=?",
+            (pid,),
+        ).fetchone()
+        if (
+            not p
+            or not p["enabled"]
+            or not p["below"]
+            or p["price"] is None
+            or p["failures"]
+            or p["status"] not in ("Проверено", "Проверяется в Chrome")
+            or p["last_success"] is None
+            or now - p["last_success"] > 900
+        ):
+            return
+        previous = None if initial else p["alert_price"]
+        if not initial:
+            active = db.execute(
+                "SELECT * FROM outbox WHERE product_id=? AND generation=? AND state IN ('pending','blocked','sending','uncertain')",
+                (pid, p["generation"]),
+            ).fetchone()
+            if active:
+                if (
+                    active["previous_price"] is not None
+                    and active["previous_price"] - p["price"] < REPEAT_DROP
+                    and active["state"] in ("pending", "blocked")
+                ):
+                    db.execute(
+                        "UPDATE outbox SET state='cancelled',error='Снижение меньше 15 ₽' WHERE id=?",
+                        (active["id"],),
+                    )
+                return
+            if previous is None or previous - p["price"] < REPEAT_DROP:
+                return
+        generation = p["generation"] + 1
+        db.execute(
+            "INSERT INTO outbox(product_id,generation,price,threshold,created_at,previous_price) VALUES(?,?,?,?,?,?)",
+            (pid, generation, p["price"], p["threshold"], now, previous),
+        )
+        db.execute("UPDATE products SET generation=? WHERE id=?", (generation, pid))
 
     def failure(self, pid, error, interval, now=None):
         now = int(time.time()) if now is None else now
@@ -410,11 +468,28 @@ class Store:
             ]
 
     def delivery(self, oid, state, error="", delay=0):
+        now = int(time.time())
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            event = db.execute("SELECT * FROM outbox WHERE id=?", (oid,)).fetchone()
+            if not event:
+                return
             db.execute(
                 "UPDATE outbox SET state=?,error=?,next_try=?,attempts=attempts+1 WHERE id=?",
-                (state, error[:300], int(time.time()) + delay, oid),
+                (state, error[:300], now + delay, oid),
             )
+            if state == "sent":
+                cursor = db.execute(
+                    "UPDATE products SET alert_price=? WHERE id=? AND generation=? AND below=1 AND COALESCE(custom_threshold,(SELECT threshold FROM tags WHERE name=products.tag))=?",
+                    (
+                        event["price"],
+                        event["product_id"],
+                        event["generation"],
+                        event["threshold"],
+                    ),
+                )
+                if cursor.rowcount:
+                    self._plan_alert(db, event["product_id"], now)
 
     def claim_notification(self, oid):
         # Browser results and owner commands may change the rule during Telegram I/O.
@@ -442,6 +517,15 @@ class Store:
                     (oid,),
                 )
                 return None
+            if (
+                row["previous_price"] is not None
+                and row["previous_price"] - row["current_price"] < REPEAT_DROP
+            ):
+                db.execute(
+                    "UPDATE outbox SET state='cancelled',error='Снижение меньше 15 ₽' WHERE id=?",
+                    (oid,),
+                )
+                return None
             monitoring = db.execute(
                 "SELECT value FROM settings WHERE key='monitoring'"
             ).fetchone()
@@ -454,8 +538,8 @@ class Store:
             ):
                 return None
             db.execute(
-                "UPDATE outbox SET state='sending',attempts=attempts+1,next_try=? WHERE id=?",
-                (now, oid),
+                "UPDATE outbox SET state='sending',attempts=attempts+1,next_try=?,price=? WHERE id=?",
+                (now, row["current_price"], oid),
             )
             return dict(row)
 
