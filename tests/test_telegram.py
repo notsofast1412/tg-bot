@@ -79,6 +79,34 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("350.00", sent[0]["text"])
             self.assertEqual(store.queue()[0]["state"], "sent")
 
+    async def test_continuous_checks_do_not_starve_price_notifications(self):
+        from paintwatch.bridge import BrowserBridge
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(directory)
+            ref = parse_ref("196525150", "ozon")
+            store.add([ref], "Paint", "#arton")
+            store.configure({"chat_id": "-1001", "monitoring": 1, "interval": 0})
+            pid = store.products()[0]["id"]
+            store.record(pid, Snapshot(ref, "Paint", 35000), 0)
+            self.assertIsNotNone(BrowserBridge(store, "fixture").job())
+            vault = SecretStore(directory)
+            vault.save(TOKEN)
+            sends = []
+
+            def handler(request):
+                if request.url.path.endswith("/sendMessage"):
+                    sends.append(json.loads(request.content))
+                return httpx.Response(200, json={"ok": True, "result": {"id": 1}})
+
+            with patch(
+                "paintwatch.telegram.Telegram",
+                side_effect=lambda token: self.api(handler),
+            ):
+                await deliver(store, vault)
+            self.assertEqual(len(sends), 1)
+            self.assertEqual(store.queue()[0]["state"], "sent")
+
     async def test_stale_or_failed_latest_check_is_not_sent(self):
         with tempfile.TemporaryDirectory() as directory:
             store = Store(directory)
@@ -97,6 +125,30 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await deliver(store, vault)
             self.assertEqual(store.queue()[0]["state"], "pending")
+
+    async def test_parallel_price_change_during_telegram_preflight_cancels_send(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(directory)
+            ref = parse_ref("196525150", "ozon")
+            store.add([ref], "Paint", "#arton")
+            pid = store.products()[0]["id"]
+            store.configure({"chat_id": "-1001", "monitoring": 1})
+            store.record(pid, Snapshot(ref, "Paint", 35000), 0)
+            vault = SecretStore(directory)
+            vault.save(TOKEN)
+
+            def handler(request):
+                if request.url.path.endswith("/sendMessage"):
+                    self.fail("The price rose while getMe was in flight")
+                store.record(pid, Snapshot(ref, "Paint", 50000), 0)
+                return httpx.Response(200, json={"ok": True, "result": {"id": 1}})
+
+            with patch(
+                "paintwatch.telegram.Telegram",
+                side_effect=lambda token: self.api(handler),
+            ):
+                await deliver(store, vault)
+            self.assertEqual(store.queue()[0]["state"], "cancelled")
 
     async def test_same_second_failed_check_does_not_look_fresh(self):
         from paintwatch.domain import PriceError

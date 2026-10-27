@@ -34,6 +34,11 @@ class Telegram:
             ) from None
         if not data.get("ok"):
             code = data.get("error_code", response.status_code)
+            if method == "getUpdates" and code == 409:
+                raise TelegramError(
+                    "Управление ЛС недоступно (409): проверьте webhook или другой запущенный экземпляр бота",
+                    delay=60,
+                )
             delay = data.get("parameters", {}).get("retry_after", 300)
             raise TelegramError(
                 f"Telegram отклонил запрос (код {code}). Проверьте токен, ID группы и права бота",
@@ -107,9 +112,9 @@ async def deliver(store, vault):
                 continue
             if (
                 not event["last_success"]
-                or event["current_status"] != "Проверено"
+                or event["current_status"] not in ("Проверено", "Проверяется в Chrome")
+                or event["current_failures"] != 0
                 or time.time() - event["last_success"] > 900
-                or event["last_attempt"] != event["last_success"]
             ):
                 continue
             try:
@@ -118,7 +123,9 @@ async def deliver(store, vault):
             except TelegramError as error:
                 store.delivery(event["id"], "pending", str(error), error.delay)
                 break
-            store.delivery(event["id"], "sending")
+            event = store.claim_notification(event["id"])
+            if event is None:
+                continue
             try:
                 await api.send(chat_id, notification(event))
             except TelegramError as error:
@@ -135,5 +142,6 @@ async def deliver(store, vault):
             import asyncio
 
             await asyncio.sleep(3)
+            break
     finally:
         await api.close()

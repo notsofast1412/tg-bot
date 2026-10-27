@@ -67,6 +67,12 @@ class DomainTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_batch("мусор https://ozon.ru/product/1/")
 
+    def test_bulk_import_200_cards_and_limit(self):
+        text = "\n".join(f"https://www.ozon.ru/product/{n}/" for n in range(1, 201))
+        self.assertEqual(len(parse_batch(text)), 200)
+        with self.assertRaises(ValueError):
+            parse_batch("\n".join(str(n) for n in range(1, 1002)), "ozon")
+
     def test_money_without_rounding(self):
         self.assertEqual(money("1 234,56 ₽"), 123456)
         for value in ("0", "-2", "nan", "inf", "1.001", ""):
@@ -231,6 +237,7 @@ class StoreTests(unittest.TestCase):
         self.store.cooldown("ozon", int(time.time()) + 1200, "rate_limit")
         with self.assertRaises(ValueError):
             self.store.resume_after_verification(self.pid)
+        self.store.cooldown("ozon", 0, "")
         self.store.cooldown("ozon", int(time.time()) + 1200, "access")
         self.store.resume_after_verification(self.pid)
         self.assertEqual(self.store.setting("cooldown_ozon"), "0")
@@ -254,6 +261,32 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(db.execute("PRAGMA integrity_check").fetchone()[0], "ok")
         with self.assertRaises(ValueError):
             self.store.backup(self.store.path)
+
+    def test_v1_migration_backs_up_and_preserves_products_history_and_settings(self):
+        import sqlite3
+
+        self.record(35000)
+        self.store.configure({"interval": 1200, "owner_id": 123})
+        with self.store.db() as db:
+            db.execute("DROP TABLE check_jobs")
+            db.execute("PRAGMA user_version=1")
+        migrated = Store(self.temp.name)
+        self.assertEqual(migrated.product(self.pid)["price"], 35000)
+        self.assertEqual(migrated.interval(), 1200)
+        self.assertEqual(len(migrated.history(self.pid)), 1)
+        self.assertEqual(len(migrated.queue()), 1)
+        with migrated.db() as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM check_jobs").fetchone()[0], 0
+            )
+        backups = list((migrated.directory / "backups").glob("*.sqlite3"))
+        self.assertEqual(len(backups), 1)
+        with closing(sqlite3.connect(backups[0])) as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM products").fetchone()[0], 1
+            )
 
     def test_single_instance(self):
         with instance_lock(self.temp.name):

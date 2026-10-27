@@ -63,7 +63,7 @@ class WindowTests(unittest.TestCase):
         self.window.interval.set("20")
         with patch("paintwatch.ui.autostart"):
             self.window.save_settings()
-        self.assertEqual(self.store.setting("interval"), "1200")
+        self.assertEqual(self.store.setting("interval"), "20")
         self.assertEqual(self.store.setting("monitoring", "0"), "0")
 
     def test_explicit_paste_and_russian_layout_replace_selection_once(self):

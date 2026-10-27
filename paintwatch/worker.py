@@ -1,10 +1,12 @@
 import asyncio
+from contextlib import suppress
 from concurrent.futures import Future
 from queue import Empty, Queue
 import threading
 import time
 
 from .browser import BrowserCollector
+from .control import TelegramControl
 from .domain import PriceError
 from .platform import open_normal_browser
 from .telegram import Telegram, TelegramError, deliver
@@ -85,6 +87,9 @@ class Worker:
     async def run(self):
         collector = BrowserCollector(self.store.directory, self.store)
         self.store.recover()
+        control = asyncio.create_task(
+            TelegramControl(self.store, self.vault, self.bridge).run()
+        )
         try:
             if self.bridge:
                 self.bridge.start()
@@ -109,7 +114,7 @@ class Worker:
                                 f"Не удалось выполнить действие ({type(error).__name__})"
                             )
                         )
-                interval = max(600, int(self.store.setting("interval", "600")))
+                interval = self.store.interval()
                 if (
                     self.store.setting("monitoring", "0") == "1"
                     and self.store.setting("collector", "extension") == "playwright"
@@ -137,7 +142,7 @@ class Worker:
                             if error.code in ("access", "rate_limit"):
                                 self.store.cooldown(
                                     p["market"],
-                                    int(time.time()) + max(interval, error.retry_after),
+                                    int(time.time()) + max(60, error.retry_after),
                                     error.code,
                                 )
                         except Exception as error:
@@ -162,6 +167,9 @@ class Worker:
                     self.store.configure({"last_backup": int(time.time())})
                 await asyncio.sleep(0.5)
         finally:
+            control.cancel()
+            with suppress(asyncio.CancelledError):
+                await control
             await collector.close()
             if self.bridge:
                 self.bridge.close()

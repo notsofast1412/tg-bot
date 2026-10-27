@@ -78,6 +78,40 @@ class BrowserSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["price"], 38000)
         self.assertEqual(result["price_kind"], "wb_product")
 
+    async def test_content_observer_reads_dynamic_price_before_page_finishes(self):
+        requests = []
+
+        async def route(request_route):
+            requests.append(request_route.request.url)
+            await request_route.fulfill(
+                status=200,
+                content_type="text/html",
+                body="<html><h1>Краска</h1><div id='root'></div></html>",
+            )
+
+        await self.page.route("**/*", route)
+        await self.page.goto(
+            "https://www.wildberries.ru/catalog/708052242/detail.aspx",
+            wait_until="domcontentloaded",
+        )
+        await self.page.evaluate(
+            "window.chrome={runtime:{onMessage:{addListener:fn=>window.collectListener=fn}}}"
+        )
+        folder = Path(__file__).resolve().parent.parent / "extension"
+        await self.page.add_script_tag(path=str(folder / "extractor.js"))
+        await self.page.add_script_tag(path=str(folder / "content.js"))
+        result = await self.page.evaluate("""async () => {
+            const state = await new Promise(resolve => collectListener({type:'paintwatch.ready'}, {}, resolve));
+            setTimeout(() => { document.querySelector('#root').innerHTML = '<div class="price-block"><div><span>380 ₽</span><span>без WB Кошелька</span></div></div>'; }, 40);
+            return new Promise(resolve => collectListener({type:'paintwatch.collect', job:{
+                market:'wb',article:'708052242',variant:'',documentId:state.documentId,
+                timeout_ms:3000,deadline:Date.now()+3000
+            }}, {}, resolve));
+        }""")
+        self.assertEqual(result["price"], 38000)
+        self.assertEqual(result["price_kind"], "wb_product")
+        self.assertEqual(len(requests), 1)
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.store = Store(self.temp.name)

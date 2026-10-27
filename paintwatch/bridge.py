@@ -19,58 +19,108 @@ class BrowserBridge:
         self.thread = None
         self.lock = threading.Lock()
 
-    def job(self):
+    def status(self):
+        now = int(time.time())
+        with self.store.db() as db:
+            active = db.execute(
+                "SELECT COUNT(*) FROM check_jobs WHERE expires>?", (now,)
+            ).fetchone()[0]
+            due = db.execute(
+                "SELECT COUNT(*) FROM products WHERE enabled=1 AND next_check<=? AND id NOT IN (SELECT product_id FROM check_jobs)",
+                (now,),
+            ).fetchone()[0]
+        return {
+            "ok": True,
+            "protocol": 2,
+            "monitoring": self.store.setting("monitoring", "0") == "1",
+            "parallelism": self.store.parallelism(),
+            "active": active,
+            "due": due,
+        }
+
+    def job(self, client="local", slot=0):
+        if not isinstance(client, str) or not re.fullmatch(
+            r"[a-zA-Z0-9_-]{1,80}", client
+        ):
+            raise ValueError("Неверный клиент")
+        if type(slot) is not int or not 0 <= slot < 32:
+            raise ValueError("Неверный слот")
         with self.lock:
             now = int(time.time())
-            if self.store.setting("monitoring", "0") != "1":
-                self.store.configure({"extension_job": "null"})
-                return None
-            interval = max(600, int(self.store.setting("interval", "600")))
-            old = json.loads(self.store.setting("extension_job", "null"))
-            if old and old["expires"] > now:
-                return None
-            if old:
+            interval = self.store.interval()
+            with self.store.db() as db:
+                expired = db.execute(
+                    "SELECT product_id FROM check_jobs WHERE expires<=?", (now,)
+                ).fetchall()
+                db.execute("DELETE FROM check_jobs WHERE expires<=?", (now,))
+            for old in expired:
                 self.store.failure(
-                    old["id"],
+                    old["product_id"],
                     PriceError("Расширение не завершило проверку карточки"),
                     interval,
                 )
-                self.store.configure({"extension_job": "null"})
-            if float(self.store.setting("extension_next_request", "0")) > time.time():
+            if self.store.setting("monitoring", "0") != "1":
                 return None
-            for p in reversed(self.store.products()):
+            capacity = self.store.parallelism()
+            cooldowns = {
+                m: int(self.store.setting(f"cooldown_{m}", "0")) for m in ("wb", "ozon")
+            }
+            with self.store.db() as db:
+                db.execute("BEGIN IMMEDIATE")
                 if (
-                    not p["enabled"]
-                    or p["next_check"] > now
-                    or int(self.store.setting(f"cooldown_{p['market']}", "0")) > now
+                    slot >= capacity
+                    or db.execute("SELECT COUNT(*) FROM check_jobs").fetchone()[0]
+                    >= capacity
+                    or db.execute(
+                        "SELECT 1 FROM check_jobs WHERE client=? AND slot=?",
+                        (client, slot),
+                    ).fetchone()
                 ):
-                    continue
+                    return None
+                p = db.execute(
+                    "SELECT * FROM products WHERE enabled=1 AND next_check<=? "
+                    "AND id NOT IN (SELECT product_id FROM check_jobs) "
+                    "AND ((market='ozon' AND ?<=?) OR (market='wb' AND ?<=?)) "
+                    "ORDER BY next_check,COALESCE((SELECT MAX(id) FROM checks WHERE product_id=products.id),0),id LIMIT 1",
+                    (now, cooldowns["ozon"], now, cooldowns["wb"], now),
+                ).fetchone()
+                if not p:
+                    return None
                 job = {
                     k: p[k]
                     for k in ("id", "market", "article", "variant", "url", "seller")
                 }
                 job.update(
                     lease=secrets.token_urlsafe(24),
-                    expires=now + 90,
+                    expires=now + self.store.check_timeout() + 15,
+                    timeout_ms=self.store.check_timeout() * 1000,
                     wb_dest=self.store.setting("wb_dest", "-1257786"),
                 )
-                with self.store.db() as db:
-                    db.execute(
-                        "UPDATE products SET last_attempt=?,status='Проверяется в Chrome',issue='' WHERE id=?",
-                        (now, p["id"]),
-                    )
-                self.store.configure(
-                    {
-                        "extension_job": json.dumps(job),
-                        "extension_next_request": time.time() + 3,
-                    }
+                db.execute(
+                    "INSERT INTO check_jobs VALUES(?,?,?,?,?,?)",
+                    (
+                        p["id"],
+                        job["lease"],
+                        job["expires"],
+                        client,
+                        slot,
+                        json.dumps(job),
+                    ),
+                )
+                db.execute(
+                    "UPDATE products SET last_attempt=?,status='Проверяется в Chrome' WHERE id=?",
+                    (now, p["id"]),
                 )
                 return job
-            return None
 
     def result(self, payload):
         with self.lock:
-            job = json.loads(self.store.setting("extension_job", "null"))
+            with self.store.db() as db:
+                row = db.execute(
+                    "SELECT payload FROM check_jobs WHERE product_id=?",
+                    (payload.get("id"),),
+                ).fetchone()
+            job = json.loads(row[0]) if row else None
             if (
                 not job
                 or payload.get("id") != job["id"]
@@ -79,13 +129,13 @@ class BrowserBridge:
             ):
                 raise ValueError("Задание устарело или уже обработано")
             p = self.store.product(job["id"])
-            interval = max(600, int(self.store.setting("interval", "600")))
+            interval = self.store.interval()
             if (
                 not p
                 or not p["enabled"]
                 or self.store.setting("monitoring", "0") != "1"
             ):
-                self.store.configure({"extension_job": "null"})
+                self.release(job["id"])
                 return
             try:
                 ref = parse_ref(payload.get("url", ""))
@@ -146,7 +196,7 @@ class BrowserBridge:
                 if error.code in ("access", "rate_limit"):
                     self.store.cooldown(
                         p["market"],
-                        int(time.time()) + max(interval, error.retry_after),
+                        int(time.time()) + max(60, error.retry_after),
                         error.code,
                     )
             except (ValueError, TypeError, KeyError, AttributeError):
@@ -156,7 +206,11 @@ class BrowserBridge:
                     interval,
                 )
             finally:
-                self.store.configure({"extension_job": "null"})
+                self.release(job["id"])
+
+    def release(self, pid):
+        with self.store.db() as db:
+            db.execute("DELETE FROM check_jobs WHERE product_id=?", (pid,))
 
     def start(self):
         bridge = self
@@ -217,14 +271,7 @@ class BrowserBridge:
                     self.reply(403, {"error": "Код подключения не принят"})
                 elif self.path == "/v1/status":
                     bridge.store.configure({"extension_seen": int(time.time())})
-                    self.reply(
-                        200,
-                        {
-                            "ok": True,
-                            "monitoring": bridge.store.setting("monitoring", "0")
-                            == "1",
-                        },
-                    )
+                    self.reply(200, bridge.status())
                 else:
                     self.reply(404, {"error": "Not found"})
 
@@ -242,7 +289,22 @@ class BrowserBridge:
                         raise ValueError
                     bridge.store.configure({"extension_seen": int(time.time())})
                     if self.path == "/v1/next":
-                        self.reply(200, {"job": bridge.job()})
+                        if payload.get("protocol") != 2:
+                            self.reply(
+                                409,
+                                {
+                                    "error": "Обновите расширение PaintWatch до версии 0.3"
+                                },
+                            )
+                            return
+                        self.reply(
+                            200,
+                            {
+                                "job": bridge.job(
+                                    payload.get("client"), payload.get("slot")
+                                )
+                            },
+                        )
                     elif self.path == "/v1/result":
                         bridge.result(payload)
                         self.reply(200, {"ok": True})

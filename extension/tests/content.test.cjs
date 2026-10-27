@@ -3,22 +3,27 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-async function collect({status = 200, body = '<html>Not JSON</html>', navigation = 200} = {}) {
+const {webcrypto: crypto} = require('node:crypto');
+async function collect({status = 200, body = '<html>Not JSON</html>', navigation = 200, visible = false, retryAfter = null, mutate = false, documentId} = {}) {
   let callback, requests = 0;
   const url = 'https://www.wildberries.ru/catalog/708052242/detail.aspx';
-  const context = vm.createContext({URL, URLSearchParams, AbortController,
+  let observer, detected = visible;
+  const price = {kind: 'visible', price: 38000, price_kind: 'wb_product', currency: 'RUB', name: 'Краска'};
+  const context = vm.createContext({URL, URLSearchParams, AbortController, crypto,
+    MutationObserver: class { constructor(fn) { observer = fn; } observe() { if (mutate) setTimeout(() => { detected = true; observer(); }, 5); } disconnect() {} },
     document: {body: {innerText: 'Краска'}, querySelector: () => null},
     performance: {getEntriesByType: () => [{responseStatus: navigation}]}, location: new URL(url),
-    setTimeout: (fn, delay) => setTimeout(fn, delay === 1000 ? 0 : delay), clearTimeout,
+    setTimeout: (fn, delay) => setTimeout(fn, delay <= 1500 ? (mutate ? 30 : 0) : delay), clearTimeout,
     fetch: async (target, options) => {
       requests++;
       assert.equal(options.credentials, 'same-origin');
-      return {status, ok: status < 400, url: 'https://www.wildberries.ru/__internal/u-card/cards/v4/detail', headers: {get: () => null}, text: async () => body};
+      return {status, ok: status < 400, url: 'https://www.wildberries.ru/__internal/u-card/cards/v4/detail', headers: {get: name => name === 'retry-after' ? retryAfter : null}, text: async () => body};
     },
     chrome: {runtime: {onMessage: {addListener: fn => { callback = fn; }}}}
   });
   for (const file of ['extractor.js', 'content.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '..', file), 'utf8'), context);
-  const result = await new Promise(resolve => callback({type: 'paintwatch.collect', job: {market: 'wb', article: '708052242', variant: '', wb_dest: '-1257786'}}, {}, resolve));
+  context.PaintWatchExtract.visible = () => detected ? price : null;
+  const result = await new Promise(resolve => callback({type: 'paintwatch.collect', job: {market: 'wb', article: '708052242', variant: '', wb_dest: '-1257786', documentId}}, {}, resolve));
   return {result, requests};
 }
 test('a non-JSON API response is not automatically labelled as a CAPTCHA', async () => {
@@ -41,4 +46,21 @@ test('a denied main page stops before the API request', async () => {
   const {result, requests} = await collect({navigation: 403});
   assert.equal(result.code, 'access');
   assert.equal(requests, 0);
+});
+
+test('visible price returns immediately without an API request', async () => {
+  const {result, requests} = await collect({visible: true});
+  assert.equal(result.price, 38000); assert.equal(requests, 0);
+});
+test('price rendered after a DOM mutation is collected without polling or API fallback', async () => {
+  const {result, requests} = await collect({mutate: true});
+  assert.equal(result.price, 38000); assert.equal(requests, 0);
+});
+test('positive Retry-After is respected without a ten-minute floor', async () => {
+  const {result} = await collect({status: 429, retryAfter: '15'});
+  assert.equal(result.retry_after, 15); assert.equal(result.code, 'rate_limit');
+});
+test('a collector request for an old document cannot read a new document', async () => {
+  const {result, requests} = await collect({visible: true, documentId: 'old-document'});
+  assert.match(result.error, /Документ/); assert.equal(requests, 0);
 });

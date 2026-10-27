@@ -125,9 +125,9 @@ def parse_batch(text, market=""):
     residue = re.sub(
         r"https?://(?:(?!https?://)[^\s<>\"'`])+|(?<!\S)\d+(?!\S)", "", text
     ).strip(" \t\n,;")
-    if not parts or residue or len(parts) > 30:
+    if not parts or residue or len(parts) > 1000:
         raise ValueError(
-            "Вставьте до 30 прямых ссылок или числовых артикулов, по одному на строку"
+            "Вставьте до 1000 прямых ссылок или числовых артикулов, по одному на строку"
         )
     unique = {}
     for part in parts:

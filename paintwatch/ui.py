@@ -1,4 +1,5 @@
 from datetime import datetime
+import time
 from queue import Empty, Queue
 import sys
 import tkinter as tk
@@ -84,13 +85,34 @@ class Window:
         self.notebook.pack(fill="both", expand=True)
         self.products_tab = ttk.Frame(self.notebook, padding=12)
         self.tags_tab = ttk.Frame(self.notebook, padding=12)
-        self.settings_tab = ttk.Frame(self.notebook, padding=16)
+        self.settings_page = ttk.Frame(self.notebook)
+        canvas = tk.Canvas(
+            self.settings_page, highlightthickness=0, background="#f1f5f9"
+        )
+        scroll = ttk.Scrollbar(
+            self.settings_page, orient="vertical", command=canvas.yview
+        )
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self.settings_tab = ttk.Frame(canvas, padding=16)
+        content = canvas.create_window((0, 0), window=self.settings_tab, anchor="nw")
+        self.settings_tab.bind(
+            "<Configure>",
+            lambda event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(
+                content, width=max(event.width, self.settings_tab.winfo_reqwidth())
+            ),
+        )
         self.queue_tab = ttk.Frame(self.notebook, padding=12)
         self.log_tab = ttk.Frame(self.notebook, padding=12)
         for tab, title in (
             (self.products_tab, "Товары"),
             (self.tags_tab, "Теги и пороги"),
-            (self.settings_tab, "Настройки"),
+            (self.settings_page, "Настройки"),
             (self.queue_tab, "Уведомления"),
             (self.log_tab, "События"),
         ):
@@ -220,9 +242,10 @@ class Window:
     def _settings(self):
         self.token = tk.StringVar()
         self.chat = tk.StringVar(value=self.store.setting("chat_id"))
-        self.interval = tk.StringVar(
-            value=str(int(self.store.setting("interval", "600")) // 60)
-        )
+        self.owner_id = tk.StringVar(value=self.store.setting("owner_id"))
+        self.interval = tk.StringVar(value=str(self.store.interval()))
+        self.parallelism = tk.StringVar(value=str(self.store.parallelism()))
+        self.check_timeout = tk.StringVar(value=str(self.store.check_timeout()))
         selected = self.store.setting("browser", "chrome")
         self.browser = tk.StringVar(
             value={
@@ -237,21 +260,45 @@ class Window:
         rows = [
             ("Токен Telegram-бота", self.token),
             ("ID группы (отрицательное число)", self.chat),
-            ("Интервал, минут (от 10 до 1440)", self.interval),
+            ("Интервал, секунд (0 — непрерывно)", self.interval),
             ("Регион WB: dest", self.dest),
         ]
         for row, (label, variable) in enumerate(rows):
             ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=8)
+            parent = form
+            if variable is self.chat:
+                parent = ttk.Frame(form)
+                parent.grid(row=row, column=1, sticky="w", padx=16)
             entry = ttk.Entry(
-                form,
+                parent,
                 textvariable=variable,
-                width=58,
+                width=20 if variable is self.chat else 58,
                 show="•" if variable is self.token else "",
             )
             ClipboardActions(entry)
-            entry.grid(row=row, column=1, sticky="w", padx=16)
-        ttk.Label(form, text="Обычный браузер с расширением").grid(
+            if variable is self.chat:
+                entry.pack(side="left")
+                ttk.Label(parent, text="Ваш ID для ЛС:").pack(side="left", padx=8)
+                owner_entry = ttk.Entry(parent, textvariable=self.owner_id, width=20)
+                ClipboardActions(owner_entry)
+                owner_entry.pack(side="left")
+            else:
+                entry.grid(row=row, column=1, sticky="w", padx=16)
+        ttk.Label(form, text="Параллельно / лимит времени").grid(
             row=4, column=0, sticky="w", pady=8
+        )
+        pool = ttk.Frame(form)
+        pool.grid(row=4, column=1, sticky="w", padx=16)
+        for label, variable in (
+            ("карточек (1–32)", self.parallelism),
+            ("секунд (1–120)", self.check_timeout),
+        ):
+            entry = ttk.Entry(pool, textvariable=variable, width=7)
+            ClipboardActions(entry)
+            entry.pack(side="left")
+            ttk.Label(pool, text=label).pack(side="left", padx=(4, 12))
+        ttk.Label(form, text="Обычный браузер с расширением").grid(
+            row=5, column=0, sticky="w", pady=8
         )
         ttk.Combobox(
             form,
@@ -259,12 +306,12 @@ class Window:
             values=["Google Chrome", "Microsoft Edge"],
             state="readonly",
             width=36,
-        ).grid(row=4, column=1, sticky="w", padx=16)
+        ).grid(row=5, column=1, sticky="w", padx=16)
         ttk.Checkbutton(
             form, text="Запускать при входе в Windows", variable=self.startup
-        ).grid(row=5, column=1, sticky="w", pady=12, padx=16)
+        ).grid(row=6, column=1, sticky="w", pady=12, padx=16)
         ttk.Label(form, text="Код подключения расширения").grid(
-            row=6, column=0, sticky="w", pady=8
+            row=7, column=0, sticky="w", pady=8
         )
         self.pairing_display = tk.StringVar(value=self.bridge.key)
         ttk.Entry(
@@ -273,13 +320,13 @@ class Window:
             state="readonly",
             show="•",
             width=45,
-        ).grid(row=6, column=1, sticky="w", padx=16)
+        ).grid(row=7, column=1, sticky="w", padx=16)
         ttk.Button(form, text="Скопировать код", command=self.copy_pairing).grid(
-            row=6, column=2, padx=4
+            row=7, column=2, padx=4
         )
         ttk.Button(
             form, text="Открыть папку расширения", command=self.open_extension
-        ).grid(row=7, column=1, sticky="w", padx=16, pady=6)
+        ).grid(row=8, column=1, sticky="w", padx=16, pady=6)
         self.extension_status = tk.StringVar(value="Расширение ещё не подключено")
         ttk.Label(
             self.settings_tab, textvariable=self.extension_status, style="Muted.TLabel"
@@ -288,6 +335,13 @@ class Window:
             saved = bool(self.vault.read())
         except RuntimeError:
             saved = False
+        self.telegram_status = tk.StringVar()
+        ttk.Label(
+            self.settings_tab,
+            textvariable=self.telegram_status,
+            style="Muted.TLabel",
+            wraplength=1060,
+        ).pack(anchor="w")
         self.token_status = tk.StringVar(
             value="Токен сохранён" if saved else "Токен не задан"
         )
@@ -393,10 +447,19 @@ class Window:
         import time
 
         connected = time.time() - int(self.store.setting("extension_seen", "0")) < 120
+        load = self.bridge.status()
+        if self.notebook.select() != str(self.settings_page):
+            self.interval.set(str(self.store.interval()))
+            self.parallelism.set(str(self.store.parallelism()))
+            self.check_timeout.set(str(self.store.check_timeout()))
         self.extension_status.set(
-            "Расширение подключено"
+            f"Расширение подключено · активных: {load['active']} · ожидают: {load['due']}"
             if connected
             else "Расширение не подключено — откройте обычный Chrome с расширением"
+        )
+        self.telegram_status.set(
+            self.store.setting("telegram_control_error")
+            or "ЛС: сохраните токен, отправьте боту /id, укажите Ваш ID. Команды: /help"
         )
         self.monitor_button.configure(text="⏸ Остановить" if active else "▶ Запустить")
         self.show_details()
@@ -503,9 +566,22 @@ class Window:
             chat = self.chat.get().strip()
             if chat and (not chat.lstrip("-").isdigit() or int(chat) >= 0):
                 raise ValueError("ID группы должен быть отрицательным целым числом")
-            minutes = int(self.interval.get())
-            if not 10 <= minutes <= 1440:
-                raise ValueError("Интервал должен быть от 10 до 1440 минут")
+            owner = self.owner_id.get().strip()
+            if owner and (not owner.isdigit() or int(owner) <= 0):
+                raise ValueError(
+                    "Ваш Telegram ID должен быть положительным числом. Узнать: /id в личном чате с ботом"
+                )
+            seconds = int(self.interval.get())
+            if not 0 <= seconds <= 2**63 - 1 - int(time.time()):
+                raise ValueError(
+                    "Интервал должен быть неотрицательным целым числом секунд в пределах SQLite"
+                )
+            parallelism = int(self.parallelism.get())
+            timeout = int(self.check_timeout.get())
+            if not 1 <= parallelism <= 32 or not 1 <= timeout <= 120:
+                raise ValueError(
+                    "Параллельно: 1–32 карточки. Лимит времени: 1–120 секунд"
+                )
             dest = self.dest.get().strip()
             if not dest.lstrip("-").isdigit():
                 raise ValueError("Регион WB должен быть числовым dest")
@@ -532,15 +608,21 @@ class Window:
                 autostart(self.startup.get())
             elif self.startup.get():
                 raise ValueError("Автозапуск доступен только в Windows")
+            changed_interval = seconds != self.store.interval()
             self.store.configure(
                 {
                     "chat_id": chat,
-                    "interval": minutes * 60,
+                    "owner_id": owner,
+                    "interval": seconds,
+                    "parallelism": parallelism,
+                    "check_timeout": timeout,
                     "browser": selected,
                     "wb_dest": dest,
                     "autostart": int(self.startup.get()),
                 }
             )
+            if changed_interval:
+                self.store.request_check()
             self.status.set("Настройки сохранены")
             if changed_browser:
                 self.submit("browser")
@@ -731,7 +813,7 @@ class ProductDialog:
         if not product:
             ttk.Label(
                 outer,
-                text="Прямые ссылки или числовые артикулы — до 30, по одному на строку",
+                text="Прямые ссылки или числовые артикулы — до 1000, по одному на строку",
             ).pack(anchor="w")
             self.urls = tk.Text(outer, height=7, wrap="word")
             self.urls.pack(fill="x", pady=8)
@@ -813,7 +895,11 @@ class ProductDialog:
                 refs = parse_batch(
                     self.urls.get("1.0", "end"), MARKETS[self.market.get()]
                 )
-                preview = "\n".join(f"{r.market.upper()}: {r.article}" for r in refs)
+                preview = "\n".join(
+                    f"{r.market.upper()}: {r.article}" for r in refs[:15]
+                )
+                if len(refs) > 15:
+                    preview += f"\n… и ещё {len(refs) - 15}"
                 if not messagebox.askyesno(
                     "Подтвердить добавление",
                     f"Добавить {len(refs)} карточек?\n{preview}\n\nДубликаты пропускаются. Цены и характеристики будут проверены после запуска мониторинга.",

@@ -14,8 +14,10 @@ class Store:
         self.path = self.directory / "prices.sqlite3"
         with self.db() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise RuntimeError("Эта база создана другой версией программы")
+            if version == 1:
+                self.backup()
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS tags(name TEXT PRIMARY KEY,threshold INTEGER NOT NULL CHECK(threshold>0));
@@ -48,7 +50,15 @@ class Store:
                 );
                 CREATE INDEX IF NOT EXISTS checks_product ON checks(product_id,checked_at);
                 CREATE INDEX IF NOT EXISTS history_product ON history(product_id,observed_at);
-                PRAGMA user_version=1;
+                CREATE INDEX IF NOT EXISTS products_due ON products(enabled,next_check);
+                CREATE INDEX IF NOT EXISTS checks_latest ON checks(product_id,id);
+                CREATE TABLE IF NOT EXISTS check_jobs(
+                    product_id INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+                    lease TEXT NOT NULL UNIQUE,expires INTEGER NOT NULL,
+                    client TEXT NOT NULL,slot INTEGER NOT NULL,payload TEXT NOT NULL,
+                    UNIQUE(client,slot)
+                );
+                PRAGMA user_version=2;
             """)
             db.executemany("INSERT OR IGNORE INTO tags VALUES(?,?)", TAGS)
 
@@ -92,7 +102,21 @@ class Store:
             ]
 
     def product(self, pid):
-        return next((p for p in self.products() if p["id"] == pid), None)
+        with self.db() as db:
+            row = db.execute(
+                "SELECT p.*,COALESCE(p.custom_threshold,t.threshold) threshold FROM products p JOIN tags t ON t.name=p.tag WHERE p.id=?",
+                (pid,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def interval(self):
+        return max(0, int(self.setting("interval", "600")))
+
+    def parallelism(self):
+        return max(1, min(32, int(self.setting("parallelism", "4"))))
+
+    def check_timeout(self):
+        return max(1, min(120, int(self.setting("check_timeout", "20"))))
 
     def add(self, refs, name, tag, threshold=None):
         added = 0
@@ -159,8 +183,8 @@ class Store:
             db.execute("DELETE FROM products WHERE id=?", (pid,))
 
     def request_check(self, pid=None):
-        # Manual checks respect the minimum interval and persisted marketplace cooldown.
-        interval = max(600, int(self.setting("interval", "600")))
+        # Reschedule without bypassing active leases or marketplace cooldowns.
+        interval = self.interval()
         with self.db() as db:
             if pid:
                 db.execute(
@@ -174,22 +198,52 @@ class Store:
                 )
 
     def cooldown(self, market, until, reason):
-        self.configure(
-            {f"cooldown_{market}": until, f"cooldown_reason_{market}": reason}
-        )
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = dict(
+                db.execute(
+                    "SELECT key,value FROM settings WHERE key IN (?,?)",
+                    (f"cooldown_{market}", f"cooldown_reason_{market}"),
+                ).fetchall()
+            )
+            previous = int(current.get(f"cooldown_{market}", "0"))
+            if until > 0 and previous > time.time():
+                # Parallel failures must never shorten an existing marketplace pause.
+                until = max(until, previous)
+                if current.get(f"cooldown_reason_{market}") == "rate_limit":
+                    reason = "rate_limit"
+            db.executemany(
+                "INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [
+                    (f"cooldown_{market}", str(until)),
+                    (f"cooldown_reason_{market}", reason),
+                ],
+            )
 
     def resume_after_verification(self, pid):
-        p = self.product(pid)
-        if not p:
-            return
-        reason = self.setting(f"cooldown_reason_{p['market']}")
-        if (
-            reason == "rate_limit"
-            and int(self.setting(f"cooldown_{p['market']}", "0")) > time.time()
-        ):
-            raise ValueError("Пауза HTTP 429 ещё действует; дождитесь окончания")
-        self.cooldown(p["market"], 0, "")
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT market FROM products WHERE id=?", (pid,)
+            ).fetchone()
+            if not row:
+                return
+            market = row["market"]
+            current = dict(
+                db.execute(
+                    "SELECT key,value FROM settings WHERE key IN (?,?)",
+                    (f"cooldown_{market}", f"cooldown_reason_{market}"),
+                ).fetchall()
+            )
+            if (
+                current.get(f"cooldown_reason_{market}") == "rate_limit"
+                and int(current.get(f"cooldown_{market}", "0")) > time.time()
+            ):
+                raise ValueError("Пауза HTTP 429 ещё действует; дождитесь окончания")
+            db.executemany(
+                "INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [(f"cooldown_{market}", "0"), (f"cooldown_reason_{market}", "")],
+            )
             db.execute("UPDATE products SET next_check=0 WHERE id=?", (pid,))
 
     def record(self, pid, snapshot, interval, now=None):
@@ -225,7 +279,7 @@ class Store:
             if snapshot.price is None:
                 db.execute(
                     "UPDATE products SET status='Цена неизвестна',issue=?,last_attempt=?,next_check=?,failures=failures+1 WHERE id=?",
-                    (snapshot.issue, now, now + interval, pid),
+                    (snapshot.issue, now, now + max(5, interval), pid),
                 )
                 return
             below = snapshot.price < p["threshold"]
@@ -273,7 +327,8 @@ class Store:
             if not p:
                 return
             delay = max(
-                min(86400, interval * 2 ** min(p["failures"], 7)), error.retry_after
+                min(86400, max(5, interval) * 2 ** min(p["failures"], 7)),
+                error.retry_after,
             )
             db.execute(
                 "UPDATE products SET last_attempt=?,next_check=?,failures=failures+1,status=?,issue=? WHERE id=?",
@@ -305,7 +360,7 @@ class Store:
             return [
                 dict(r)
                 for r in db.execute(
-                    "SELECT o.*,p.name,p.url,p.tag,p.market,p.price current_price,p.status current_status,p.last_success,p.last_attempt,p.enabled,p.below,p.generation current_generation,COALESCE(p.custom_threshold,t.threshold) current_threshold FROM outbox o JOIN products p ON p.id=o.product_id JOIN tags t ON t.name=p.tag ORDER BY o.id DESC"
+                    "SELECT o.*,p.name,p.url,p.tag,p.market,p.price current_price,p.status current_status,p.failures current_failures,p.last_success,p.last_attempt,p.enabled,p.below,p.generation current_generation,COALESCE(p.custom_threshold,t.threshold) current_threshold FROM outbox o JOIN products p ON p.id=o.product_id JOIN tags t ON t.name=p.tag ORDER BY o.id DESC"
                 )
             ]
 
@@ -315,6 +370,49 @@ class Store:
                 "UPDATE outbox SET state=?,error=?,next_try=?,attempts=attempts+1 WHERE id=?",
                 (state, error[:300], int(time.time()) + delay, oid),
             )
+
+    def claim_notification(self, oid):
+        # Browser results and owner commands may change the rule during Telegram I/O.
+        now = int(time.time())
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT o.*,p.name,p.url,p.tag,p.market,p.price current_price,p.status current_status,p.failures current_failures,p.last_success,p.last_attempt,p.enabled,p.below,p.generation current_generation,COALESCE(p.custom_threshold,t.threshold) current_threshold FROM outbox o JOIN products p ON p.id=o.product_id JOIN tags t ON t.name=p.tag WHERE o.id=?",
+                (oid,),
+            ).fetchone()
+            if (
+                not row
+                or row["state"] not in ("pending", "blocked")
+                or row["next_try"] > now
+            ):
+                return None
+            if (
+                not row["enabled"]
+                or not row["below"]
+                or row["generation"] != row["current_generation"]
+                or row["threshold"] != row["current_threshold"]
+            ):
+                db.execute(
+                    "UPDATE outbox SET state='cancelled',error='Условие больше не действует' WHERE id=?",
+                    (oid,),
+                )
+                return None
+            monitoring = db.execute(
+                "SELECT value FROM settings WHERE key='monitoring'"
+            ).fetchone()
+            if (
+                (monitoring and monitoring[0] != "1")
+                or not row["last_success"]
+                or now - row["last_success"] > 900
+                or row["current_failures"]
+                or row["current_status"] not in ("Проверено", "Проверяется в Chrome")
+            ):
+                return None
+            db.execute(
+                "UPDATE outbox SET state='sending',attempts=attempts+1,next_try=? WHERE id=?",
+                (now, oid),
+            )
+            return dict(row)
 
     def recover(self):
         with self.db() as db:
