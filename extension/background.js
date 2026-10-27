@@ -1,6 +1,8 @@
 importScripts('extractor.js');
 const BASE = 'http://127.0.0.1:18765';
 const active = new Map();
+const liveTabs = new Map();
+let cleanedLegacy = false;
 let pumping = false, wakeTimer;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function bounded(promise, ms) {
@@ -32,30 +34,50 @@ async function ready(tab) {
   try { return await bounded(chrome.tabs.sendMessage(tab, {type: 'paintwatch.ready'}), 300); }
   catch { return null; }
 }
-async function openJob(job, slot, deadline) {
-  const key = `tab_${job.market}_${slot}`;
-  const owned = (await chrome.storage.session.get(key))[key];
-  let tab, previous;
-  if (owned) {
-    try {
-      const existing = await chrome.tabs.get(owned.id);
-      const old = PaintWatchExtract.ref(existing.url), expected = PaintWatchExtract.ref(owned.url);
-      if (old.market === expected.market && old.article === expected.article && old.variant === expected.variant) tab = existing;
-    } catch { /* The user closed or repurposed the tab. */ }
-  }
-  if (Date.now() >= deadline) throw new Error('Время проверки истекло');
+async function closeOwned(owned, key) {
+  let tab;
+  try { tab = await chrome.tabs.get(owned.id); }
+  catch { /* Already closed. */ }
+  let same = false;
   if (tab) {
-    previous = (await ready(tab.id))?.documentId;
-    if (Date.now() >= deadline) throw new Error('Время проверки истекло');
-    const old = PaintWatchExtract.ref(tab.url);
-    if (old.market === job.market && old.article === job.article && old.variant === job.variant) await chrome.tabs.reload(tab.id, {bypassCache: true});
-    else await chrome.tabs.update(tab.id, {url: job.url});
-  } else tab = await chrome.tabs.create({url: job.url, active: false});
-  await chrome.storage.session.set({[key]: {id: tab.id, url: job.url}, owned: {id: tab.id, url: job.url}});
+    try {
+      const actual = PaintWatchExtract.ref(tab.url), expected = PaintWatchExtract.ref(owned.url);
+      same = actual.market === expected.market && actual.article === expected.article && actual.variant === expected.variant;
+    } catch { /* Repurposed by the user. */ }
+  }
+  if (same) {
+    try { await chrome.tabs.remove(owned.id); }
+    catch { return; } // Keep ownership so the next cleanup can retry.
+  }
+  if (key) await chrome.storage.session.remove(key);
+}
+async function cleanupTabs() {
+  const saved = await chrome.storage.session.get(null);
+  const live = new Set([...liveTabs.values()].map(tab => tab.id));
+  for (const [key, owned] of Object.entries(saved)) {
+    if (/^check_tab_\d+$/.test(key) && !live.has(owned.id)) await closeOwned(owned, key);
+    if (/^tab_(?:wb|ozon)_\d+$/.test(key) && !live.has(owned.id)) await closeOwned(owned, key);
+  }
+  if (!cleanedLegacy) {
+    for (const owned of Object.values(saved.ownedTabs || {})) if (!live.has(owned.id)) await closeOwned(owned);
+    if (saved.owned && !live.has(saved.owned.id)) await closeOwned(saved.owned);
+    await chrome.storage.session.remove('ownedTabs');
+    cleanedLegacy = true;
+  }
+}
+async function openJob(job, slot, deadline) {
+  const tab = await chrome.tabs.create({url: job.url, active: false});
+  const owned = {id: tab.id, url: job.url};
+  if (Date.now() >= deadline) {
+    await closeOwned(owned);
+    throw new Error('Время проверки истекло');
+  }
+  liveTabs.set(slot, owned);
+  await chrome.storage.session.set({[`check_tab_${slot}`]: owned, owned});
   const navigationDeadline = Math.min(deadline, Date.now() + Math.min(12000, job.timeout_ms * 0.6));
   while (Date.now() < navigationDeadline) {
     const state = await ready(tab.id);
-    if (state?.documentId && state.documentId !== previous) {
+    if (state?.documentId) {
       try {
         const ref = PaintWatchExtract.ref(state.url);
         if (ref.market === job.market && ref.article === job.article && ref.variant === job.variant) return {tab: tab.id, documentId: state.documentId};
@@ -86,6 +108,12 @@ async function runSlot(slot, client) {
       catch { /* The persisted lease recovers a lost result after expiry. */ }
     }
     await showStatus(e.message || 'Нет связи с PaintWatch. Проверьте, что приложение запущено');
+  } finally {
+    const owned = liveTabs.get(slot);
+    if (owned) {
+      await closeOwned(owned, `check_tab_${slot}`);
+      liveTabs.delete(slot);
+    }
   }
 }
 function schedule(delay = 1000) {
@@ -98,6 +126,7 @@ async function tick() {
   try {
     const config = await chrome.storage.local.get(['enabled', 'client']);
     if (!config.enabled) return;
+    await cleanupTabs();
     const client = config.client || crypto.randomUUID();
     if (!config.client) await chrome.storage.local.set({client});
     const status = await api('/v1/status');
@@ -126,7 +155,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   }
   if (message.type === 'paintwatch.tick') { tick(); reply({ok: true}); }
   if (message.type === 'paintwatch.open') {
-    chrome.storage.session.get('owned').then(({owned}) => { if (owned) chrome.tabs.update(owned.id, {active: true}); });
+    chrome.storage.session.get('owned').then(({owned}) => { if (owned?.url) chrome.tabs.create({url: owned.url, active: true}); });
     reply({ok: true});
   }
 });

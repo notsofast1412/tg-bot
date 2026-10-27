@@ -6,16 +6,16 @@ const vm = require('node:vm');
 const {webcrypto: crypto} = require('node:crypto');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function environment({monitoring = true, existing, count = 1, parallelism = 1, hold = false, stale = false, timeout = 1000} = {}) {
-  const calls = [], created = [], changed = [], pending = [], documents = new Map(), tabs = new Map();
+  const calls = [], created = [], changed = [], closed = [], pending = [], documents = new Map(), tabs = new Map();
   const local = {key: 'fixture', enabled: true}, session = {};
-  let reads = 0;
+  let reads = 0, nextTabId = 2, onMessage;
   if (existing) {
     session.tab_ozon_0 = {id: 1, url: 'https://www.ozon.ru/product/1/'};
     tabs.set(1, {id: 1, url: existing});
-    documents.set(1, 'old-document');
+    documents.set(1, 'legacy-document');
   }
   const jobs = Array.from({length: count}, (_, i) => ({id: i + 1, market: 'ozon', article: String(i + 1), variant: '', url: `https://www.ozon.ru/product/${i + 1}/`, lease: `lease${i}`, timeout_ms: timeout}));
-  const storage = object => ({get: async () => ({...object}), set: async value => Object.assign(object, value)});
+  const storage = object => ({get: async () => ({...object}), set: async value => Object.assign(object, value), remove: async key => { delete object[key]; }});
   const listener = {addListener() {}};
   const context = vm.createContext({URL, AbortController, crypto, console,
     setTimeout: (fn, delay) => setTimeout(fn, delay === 100 ? 0 : delay), clearTimeout,
@@ -28,20 +28,21 @@ function environment({monitoring = true, existing, count = 1, parallelism = 1, h
     chrome: {
       storage: {local: storage(local), session: storage(session)},
       alarms: {onAlarm: listener, create() {}},
-      runtime: {onInstalled: listener, onStartup: listener, onMessage: listener},
+      runtime: {onInstalled: listener, onStartup: listener, onMessage: {addListener: fn => { onMessage = fn; }}},
       tabs: {
         // status intentionally stays loading: images must not hold up price collection.
         get: async id => ({...tabs.get(id), status: 'loading'}),
         create: async options => {
-          const id = tabs.size + 2, tab = {id, url: options.url};
+          const id = nextTabId++, tab = {id, url: options.url};
           tabs.set(id, tab); documents.set(id, `doc${id}`); created.push(options); return tab;
         },
+        remove: async id => { closed.push(id); tabs.delete(id); },
         update: async (id, options) => { changed.push([id, options]); tabs.set(id, {id, url: options.url}); documents.set(id, 'new-document'); },
         reload: async id => { changed.push([id]); documents.set(id, 'new-document'); },
         sendMessage: async (id, message) => {
           if (message.type === 'paintwatch.ready') {
             reads++;
-            return {documentId: stale && reads <= 3 ? 'old-document' : documents.get(id), url: tabs.get(id).url};
+            return {documentId: stale && reads <= 3 ? '' : documents.get(id), url: tabs.get(id).url};
           }
           assert.notEqual(message.job.documentId, 'old-document');
           const result = {kind: 'visible', url: tabs.get(id).url, name: 'Paint', price: 35000, currency: 'RUB', price_kind: 'ozon_card'};
@@ -56,7 +57,7 @@ function environment({monitoring = true, existing, count = 1, parallelism = 1, h
   // Exercise the scheduler explicitly; never leave real polling timers behind in tests.
   vm.runInContext('schedule = () => {}', context);
   const settle = async () => { await vm.runInContext('Promise.all([...active.values()])', context); };
-  return {context, calls, created, changed, local, pending, settle};
+  return {context, calls, created, changed, closed, local, session, pending, settle, tabs, message: message => new Promise(reply => onMessage(message, {}, reply))};
 }
 test('background sends a leased result before images finish loading', async () => {
   const e = environment();
@@ -65,6 +66,9 @@ test('background sends a leased result before images finish loading', async () =
   assert.equal(e.created[0].active, false);
   const sent = e.calls.find(c => c.url.endsWith('/result')).body;
   assert.equal(sent.id, 1); assert.equal(sent.lease, 'lease0'); assert.equal(sent.price, 35000);
+  assert.equal(e.closed.length, 1);
+  assert.equal(e.tabs.size, 0);
+  assert.equal(e.session.check_tab_0, undefined);
   const claim = e.calls.find(c => c.url.endsWith('/next')).body;
   assert.equal(claim.protocol, 2); assert.equal(claim.slot, 0); assert.ok(claim.client);
 });
@@ -78,11 +82,14 @@ test('a tab repurposed by the user is not reloaded or replaced', async () => {
   const e = environment({existing: 'https://example.com/'});
   await e.context.tick(); await e.settle();
   assert.equal(e.created.length, 1); assert.equal(e.changed.length, 0);
+  assert.ok(e.tabs.has(1)); assert.ok(!e.closed.includes(1));
 });
-test('reload waits for a fresh document instead of accepting the previous card DOM', async () => {
+test('old checker tabs are cleaned on upgrade and new temporary tabs close after reading', async () => {
   const e = environment({existing: 'https://www.ozon.ru/product/1/', stale: true});
   await e.context.tick(); await e.settle();
-  assert.equal(e.created.length, 0); assert.equal(e.changed.length, 1);
+  assert.equal(e.created.length, 1); assert.equal(e.changed.length, 0);
+  assert.equal(e.closed.length, 2);
+  assert.equal(e.tabs.size, 0);
   assert.equal(e.calls.filter(c => c.url.endsWith('/result')).length, 1);
 });
 test('four cards really overlap and a free slot refills while three remain blocked', async () => {
@@ -99,8 +106,10 @@ test('four cards really overlap and a free slot refills while three remain block
   for (let n = 0; e.pending.length < 4 && n < 100; n++) await sleep(2);
   assert.equal(e.pending.length, 4);
   assert.equal(e.calls.filter(c => c.url.endsWith('/next')).length, 5);
-  // Reuse of the first slot reloads its own tab, rather than opening 200 tabs.
-  assert.equal(e.created.length, 4);
+  // The finished card is closed before its slot opens another one.
+  assert.equal(e.created.length, 5);
+  assert.equal(e.closed.length, 1);
+  assert.equal(e.tabs.size, 4);
   for (const release of e.pending.splice(0)) release();
   await e.settle();
 });
@@ -112,7 +121,41 @@ test('a hung card is bounded by its timeout and reports its lease only once', as
   assert.equal(results.length, 1);
   assert.equal(results[0].body.lease, 'lease0');
   assert.match(results[0].body.error, /Время проверки/);
+  assert.equal(e.closed.length, 1);
+  assert.equal(e.tabs.size, 0);
   for (const release of e.pending.splice(0)) release();
   await sleep(2);
   assert.equal(e.calls.filter(c => c.url.endsWith('/result')).length, 1);
+});
+
+test('orphaned temporary tabs from a stopped service worker are closed', async () => {
+  const e = environment({count: 0});
+  e.session.check_tab_3 = {id: 91, url: 'https://www.ozon.ru/product/91/'};
+  e.tabs.set(91, {id: 91, url: e.session.check_tab_3.url});
+  await e.context.tick(); await e.settle();
+  assert.ok(e.closed.includes(91));
+  assert.equal(e.session.check_tab_3, undefined);
+});
+test('a checker tab navigated to another page by the user is left open', async () => {
+  const e = environment({hold: true});
+  await e.context.tick();
+  for (let n = 0; e.pending.length < 1 && n < 100; n++) await sleep(2);
+  const [id] = e.tabs.keys();
+  e.tabs.set(id, {id, url: 'https://example.com/'});
+  e.pending.shift()();
+  await e.settle();
+  assert.ok(e.tabs.has(id)); assert.equal(e.closed.length, 0);
+  assert.equal(e.session.check_tab_0, undefined);
+});
+
+test('the popup can reopen a closed card as a normal tab for manual checking', async () => {
+  const e = environment();
+  await e.context.tick(); await e.settle();
+  assert.equal(e.tabs.size, 0);
+  await e.message({type: 'paintwatch.open'}); await sleep(2);
+  assert.equal(e.tabs.size, 1);
+  assert.equal(e.created.at(-1).active, true);
+  assert.equal(e.created.at(-1).url, 'https://www.ozon.ru/product/1/');
+  await e.context.tick(); await e.settle();
+  assert.equal(e.tabs.size, 1);
 });
