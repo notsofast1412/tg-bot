@@ -112,6 +112,56 @@ class BrowserSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["price_kind"], "wb_product")
         self.assertEqual(len(requests), 1)
 
+    async def test_wb_unlabelled_regular_price_is_distinct_from_wallet_and_struck_price(
+        self,
+    ):
+        await self.page.set_content(
+            '<h1>Краска</h1><div class="price-block"><span class="price-block__wallet-price">261 ₽</span>'
+            '<span class="price-block__final-price">270 ₽</span><del class="price-block__old-price">379 ₽</del></div>'
+        )
+        await self.page.add_script_tag(
+            path=str(
+                Path(__file__).resolve().parent.parent / "extension" / "extractor.js"
+            )
+        )
+        result = await self.page.evaluate(
+            'PaintWatchExtract.visible(document,{market:"wb"})'
+        )
+        self.assertEqual(result["price"], 27000)
+        self.assertEqual(result["price_kind"], "wb_product")
+        diagnostic = await self.page.evaluate(
+            'PaintWatchExtract.diagnose(document,{market:"wb",article:"708052242",variant:""})'
+        )
+        self.assertEqual(diagnostic["matched"]["price"], 27000)
+        self.assertIn(37900, diagnostic["roots"][0]["prices"])
+
+    async def test_wb_structural_prices_reject_ambiguous_hidden_wallet_and_struck_regular(
+        self,
+    ):
+        script = str(
+            Path(__file__).resolve().parent.parent / "extension" / "extractor.js"
+        )
+        fixtures = [
+            '<span class="price-block__wallet-price">261 ₽</span>',
+            '<span class="price-block__wallet-price price-block__final-price">261 ₽</span>',
+            '<span class="price-block__wallet-price">261 ₽</span><del class="price-block__final-price">379 ₽</del>',
+            '<span class="price-block__wallet-price" style="display:none">261 ₽</span><span class="price-block__final-price">270 ₽</span>',
+            '<span class="price-block__wallet-price">261 ₽</span><span class="price-block__final-price">270 ₽</span><span class="price-block__final-price">280 ₽</span>',
+            '<span class="price-block__wallet-price">261 ₽</span><span class="price-block__final-price">250 ₽</span>',
+            '<span class="price-block__wallet-price"><span class="price-block__final-price">261 ₽</span></span>',
+        ]
+        for html in fixtures:
+            with self.subTest(html=html):
+                await self.page.set_content(
+                    '<h1>Краска</h1><div class="price-block">' + html + "</div>"
+                )
+                await self.page.add_script_tag(path=script)
+                self.assertIsNone(
+                    await self.page.evaluate(
+                        'PaintWatchExtract.visible(document,{market:"wb"})'
+                    )
+                )
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.store = Store(self.temp.name)

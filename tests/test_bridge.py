@@ -252,3 +252,83 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(self.store.setting("cooldown_reason_ozon"), "rate_limit")
         with self.assertRaises(ValueError):
             self.store.resume_after_verification(second["id"])
+
+    def test_scan_all_bypasses_schedule_without_starting_periodic_monitoring(self):
+        self.store.configure({"monitoring": 0, "interval": 600})
+        with self.store.db() as db:
+            db.execute("UPDATE products SET next_check=?", (int(time.time()) + 86400,))
+        self.assertIsNone(self.bridge.job())
+        self.assertEqual(self.store.request_scan(), 1)
+        self.assertEqual(
+            self.store.request_scan(), 1
+        )  # Repeated clicks never duplicate work.
+        self.assertTrue(self.bridge.status()["monitoring"])
+        self.assertEqual(self.bridge.status()["manual"], 1)
+        job = self.bridge.job()
+        self.assertIsNone(self.bridge.job("other", 1))
+        self.bridge.result(self.visible(job))
+        self.assertEqual(self.store.product(job["id"])["price"], 35000)
+        self.assertEqual(self.bridge.status()["manual"], 0)
+        self.assertFalse(self.bridge.status()["monitoring"])
+        self.assertEqual(self.store.setting("monitoring"), "0")
+        self.assertIsNone(self.bridge.job())
+
+    def test_scan_prioritizes_manual_products_and_counts_already_running_job_once(self):
+        self.store.add([parse_ref("2", "ozon")], "", "#arton")
+        job = self.bridge.job()
+        self.assertEqual(self.store.request_scan(), 2)
+        self.bridge.result(self.visible(job))
+        other = self.bridge.job()
+        self.assertNotEqual(other["id"], job["id"])
+        self.bridge.result(self.visible(other))
+        self.assertEqual(self.bridge.status()["manual"], 0)
+        self.assertEqual(len(self.store.history(job["id"])), 1)
+
+    def test_manual_scan_respects_market_pause_product_pause_and_stop(self):
+        pid = self.store.products()[0]["id"]
+        self.store.configure({"monitoring": 0})
+        self.store.cooldown("ozon", int(time.time()) + 1200, "rate_limit")
+        self.store.request_scan()
+        self.assertIsNone(self.bridge.job())
+        self.assertEqual(self.bridge.status()["manual"], 1)
+        self.store.enable(pid, False)
+        self.assertEqual(self.bridge.status()["manual"], 0)
+        self.assertEqual(self.store.request_scan(), 0)
+        self.store.enable(pid, True)
+        self.store.cooldown("ozon", 0, "")
+        self.store.request_scan()
+        job = self.bridge.job()
+        self.store.stop_monitoring()
+        self.bridge.result(self.visible(job))
+        self.assertIsNone(self.store.product(pid)["price"])
+        self.assertEqual(self.bridge.status()["manual"], 0)
+
+    def test_failed_or_expired_manual_scan_finishes_without_infinite_retry(self):
+        self.store.configure({"monitoring": 0, "interval": 0})
+        self.store.request_scan()
+        job = self.bridge.job()
+        self.bridge.result(
+            {
+                "id": job["id"],
+                "lease": job["lease"],
+                "url": job["url"],
+                "error": "No price",
+            }
+        )
+        self.assertEqual(self.bridge.status()["manual"], 0)
+        self.assertIsNone(self.bridge.job())
+        self.store.request_scan()
+        job = self.bridge.job()
+        with patch("time.time", return_value=job["expires"] + 1):
+            self.assertIsNone(self.bridge.job())
+        self.assertEqual(self.bridge.status()["manual"], 0)
+
+    def test_manual_queue_survives_app_restart_and_still_finishes_once(self):
+        self.store.configure({"monitoring": 0})
+        self.store.request_scan()
+        restored = BrowserBridge(Store(self.temp.name), "fixture")
+        self.assertEqual(restored.status()["manual"], 1)
+        job = restored.job()
+        restored.result(self.visible(job))
+        self.assertEqual(restored.status()["manual"], 0)
+        self.assertIsNone(restored.job())

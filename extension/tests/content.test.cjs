@@ -4,16 +4,16 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const {webcrypto: crypto} = require('node:crypto');
-async function collect({status = 200, body = '<html>Not JSON</html>', navigation = 200, visible = false, retryAfter = null, mutate = false, documentId} = {}) {
+async function collect({status = 200, body = '<html>Not JSON</html>', navigation = 200, visible = false, retryAfter = null, mutate = false, documentId, mutationDelay = 5, seller = false, timeout = 200} = {}) {
   let callback, requests = 0;
   const url = 'https://www.wildberries.ru/catalog/708052242/detail.aspx';
   let observer, detected = visible;
   const price = {kind: 'visible', price: 38000, price_kind: 'wb_product', currency: 'RUB', name: 'Краска'};
   const context = vm.createContext({URL, URLSearchParams, AbortController, crypto,
-    MutationObserver: class { constructor(fn) { observer = fn; } observe() { if (mutate) setTimeout(() => { detected = true; observer(); }, 5); } disconnect() {} },
+    MutationObserver: class { constructor(fn) { observer = fn; } observe() { if (mutate) setTimeout(() => { detected = true; observer(); }, mutationDelay); } disconnect() {} },
     document: {body: {innerText: 'Краска'}, querySelector: () => null},
     performance: {getEntriesByType: () => [{responseStatus: navigation}]}, location: new URL(url),
-    setTimeout: (fn, delay) => setTimeout(fn, delay <= 1500 ? (mutate ? 30 : 0) : delay), clearTimeout,
+    setTimeout, clearTimeout,
     fetch: async (target, options) => {
       requests++;
       assert.equal(options.credentials, 'same-origin');
@@ -23,7 +23,7 @@ async function collect({status = 200, body = '<html>Not JSON</html>', navigation
   });
   for (const file of ['extractor.js', 'content.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '..', file), 'utf8'), context);
   context.PaintWatchExtract.visible = () => detected ? price : null;
-  const result = await new Promise(resolve => callback({type: 'paintwatch.collect', job: {market: 'wb', article: '708052242', variant: '', wb_dest: '-1257786', documentId}}, {}, resolve));
+  const result = await new Promise(resolve => callback({type: 'paintwatch.collect', job: {market: 'wb', article: '708052242', variant: '', wb_dest: '-1257786', documentId, timeout_ms: timeout, deadline: Date.now() + timeout, seller: seller ? '123' : ''}}, {}, resolve));
   return {result, requests};
 }
 test('a non-JSON API response is not automatically labelled as a CAPTCHA', async () => {
@@ -32,13 +32,13 @@ test('a non-JSON API response is not automatically labelled as a CAPTCHA', async
   assert.match(result.error, /Резервный API WB/);
   assert.equal(requests, 1);
 });
-test('an actual API challenge is distinguished from an unsupported response', async () => {
+test('an API challenge does not prove a main-page CAPTCHA', async () => {
   const {result} = await collect({body: '<script src="/__wbaas/challenges/antibot/browser-check.js"></script>'});
-  assert.equal(result.code, 'access');
+  assert.equal(result.code, 'unavailable');
 });
 test('API rejection explicitly identifies the API stage', async () => {
   const {result, requests} = await collect({status: 403});
-  assert.equal(result.code, 'access');
+  assert.equal(result.code, 'unavailable');
   assert.match(result.error, /Резервный API WB.*403/);
   assert.equal(requests, 1);
 });
@@ -63,4 +63,14 @@ test('positive Retry-After is respected without a ten-minute floor', async () =>
 test('a collector request for an old document cannot read a new document', async () => {
   const {result, requests} = await collect({visible: true, documentId: 'old-document'});
   assert.match(result.error, /Документ/); assert.equal(requests, 0);
+});
+
+test('a price appearing after API 403 is still collected within the overall deadline', async () => {
+  const {result, requests} = await collect({status: 403, mutate: true, mutationDelay: 70});
+  assert.equal(requests, 1);
+  assert.equal(result.kind, 'visible'); assert.equal(result.price, 38000);
+});
+test('a pinned seller is not silently bypassed by a visible price without seller identity', async () => {
+  const {result} = await collect({status: 403, visible: true, seller: true});
+  assert.equal(result.code, 'unavailable'); assert.equal(result.price, undefined);
 });

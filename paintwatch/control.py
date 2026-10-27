@@ -17,6 +17,8 @@ HELP = """PaintWatch — управление
 /delete ID confirm — удалить товар и его историю
 /pause ID /resume ID — выключить / включить товар
 /check [ID|all] — запросить проверки по текущему интервалу
+/scan — разово проверить все включённые товары сейчас
+/tag #название РУБЛИ — создать тег с порогом
 /verified ID — повторить после ручной проверки доступа
 /interval СЕКУНДЫ — интервал, 0 = непрерывный обход
 /parallel ЧИСЛО — 1–32 одновременные проверки
@@ -43,9 +45,10 @@ class TelegramControl:
             for p in reversed(products)
             if p["enabled"] and p["issue"]
         ]
-        if self.store.setting("monitoring", "0") == "1" and any(
-            p["enabled"] for p in products
-        ):
+        if (
+            self.store.setting("monitoring", "0") == "1"
+            or (self.bridge and self.bridge.status()["manual"])
+        ) and any(p["enabled"] for p in products):
             if (
                 self.store.setting("collector", "extension") == "extension"
                 and time.time()
@@ -78,17 +81,27 @@ class TelegramControl:
                 f"Мониторинг: {'включён' if self.store.setting('monitoring', '0') == '1' else 'остановлен'}\n"
                 f"Товаров: {len(products)}, включено: {sum(p['enabled'] for p in products)}\n"
                 f"Проверяется: {status['active']}, ожидают: {status['due']}\n"
+                f"Разовый обход: осталось {status.get('manual', 0)}\n"
                 f"Интервал: {self.store.interval()} с (0 = непрерывно)\n"
                 f"Параллельно: {self.store.parallelism()}, лимит: {self.store.check_timeout()} с\n"
                 f"Проблем: {len(self.problems())}"
             )
         if command in ("/run", "/stop"):
-            self.store.configure({"monitoring": int(command == "/run")})
+            if command == "/stop":
+                self.store.stop_monitoring()
+            else:
+                self.store.configure({"monitoring": 1})
             return (
                 "Мониторинг включён"
                 if command == "/run"
                 else "Мониторинг остановлен. Текущие результаты не будут приняты"
             )
+        if command == "/scan":
+            count = self.store.request_scan()
+            return f"Разово проверить все цены: {count} включённых товаров. Расписание и паузы площадок сохраняются"
+        if command == "/tag" and len(args) == 2:
+            tag = self.store.add_tag(args[0], money(args[1]))
+            return f"Создан тег {tag}, порог {rub(money(args[1]))}"
         if command == "/products":
             page = int(args[0]) if args else 1
             if page < 1:

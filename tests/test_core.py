@@ -269,6 +269,7 @@ class StoreTests(unittest.TestCase):
         self.store.configure({"interval": 1200, "owner_id": 123})
         with self.store.db() as db:
             db.execute("DROP TABLE check_jobs")
+            db.execute("DROP TABLE manual_checks")
             db.execute("PRAGMA user_version=1")
         migrated = Store(self.temp.name)
         self.assertEqual(migrated.product(self.pid)["price"], 35000)
@@ -276,7 +277,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(migrated.history(self.pid)), 1)
         self.assertEqual(len(migrated.queue()), 1)
         with migrated.db() as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
             self.assertEqual(
                 db.execute("SELECT COUNT(*) FROM check_jobs").fetchone()[0], 0
             )
@@ -287,6 +288,38 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(
                 db.execute("SELECT COUNT(*) FROM products").fetchone()[0], 1
             )
+
+    def test_v2_migration_preserves_active_job_and_adds_manual_queue(self):
+        from paintwatch.bridge import BrowserBridge
+
+        self.store.configure({"monitoring": 1})
+        job = BrowserBridge(self.store, "fixture").job()
+        with self.store.db() as db:
+            db.execute("DROP TABLE manual_checks")
+            db.execute("PRAGMA user_version=2")
+        migrated = Store(self.temp.name)
+        with migrated.db() as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(
+                db.execute("SELECT lease FROM check_jobs").fetchone()[0], job["lease"]
+            )
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM manual_checks").fetchone()[0], 0
+            )
+        self.assertTrue(list((migrated.directory / "backups").glob("*.sqlite3")))
+
+    def test_custom_tag_is_available_for_products_and_survives_restart(self):
+        tag = self.store.add_tag("Montana-94", 50000)
+        self.assertEqual(tag, "#montana-94")
+        self.store.edit(self.pid, "Paint", tag, None, "", "", "")
+        restored = Store(self.temp.name)
+        self.assertEqual(restored.product(self.pid)["threshold"], 50000)
+        with self.assertRaises(ValueError):
+            restored.add_tag("montana-94", 60000)
+        self.assertEqual(restored.product(self.pid)["threshold"], 50000)
+        for name, value in (("#bad tag", 100), ("#", 100), ("#new", 0)):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                restored.add_tag(name, value)
 
     def test_single_instance(self):
         with instance_lock(self.temp.name):

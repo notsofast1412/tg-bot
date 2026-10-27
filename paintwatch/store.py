@@ -2,6 +2,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 import sqlite3
+import re
+import secrets
 import time
 
 from .domain import TAGS, PriceError
@@ -14,9 +16,9 @@ class Store:
         self.path = self.directory / "prices.sqlite3"
         with self.db() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise RuntimeError("Эта база создана другой версией программы")
-            if version == 1:
+            if version in (1, 2):
                 self.backup()
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -58,7 +60,11 @@ class Store:
                     client TEXT NOT NULL,slot INTEGER NOT NULL,payload TEXT NOT NULL,
                     UNIQUE(client,slot)
                 );
-                PRAGMA user_version=2;
+                CREATE TABLE IF NOT EXISTS manual_checks(
+                    product_id INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+                    request TEXT NOT NULL
+                );
+                PRAGMA user_version=3;
             """)
             db.executemany("INSERT OR IGNORE INTO tags VALUES(?,?)", TAGS)
 
@@ -91,6 +97,44 @@ class Store:
     def tags(self):
         with self.db() as db:
             return [dict(r) for r in db.execute("SELECT * FROM tags ORDER BY rowid")]
+
+    def add_tag(self, name, threshold):
+        name = "#" + name.strip().lstrip("#").casefold()
+        if not re.fullmatch(r"#[\w-]{1,50}", name):
+            raise ValueError(
+                "Тег: до 50 букв, цифр, дефисов или подчёркиваний, без пробелов"
+            )
+        if type(threshold) is not int or not 0 < threshold <= 10**10:
+            raise ValueError("Укажите положительный порог цены")
+        try:
+            with self.db() as db:
+                db.execute("INSERT INTO tags VALUES(?,?)", (name, threshold))
+        except sqlite3.IntegrityError:
+            raise ValueError("Такой тег уже существует") from None
+        return name
+
+    def request_scan(self):
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "INSERT OR IGNORE INTO manual_checks SELECT id,? FROM products WHERE enabled=1",
+                (secrets.token_urlsafe(16),),
+            )
+            return db.execute("SELECT COUNT(*) FROM manual_checks").fetchone()[0]
+
+    def manual_request(self, pid):
+        with self.db() as db:
+            row = db.execute(
+                "SELECT request FROM manual_checks WHERE product_id=?", (pid,)
+            ).fetchone()
+            return row[0] if row else None
+
+    def stop_monitoring(self):
+        with self.db() as db:
+            db.execute(
+                "INSERT INTO settings VALUES('monitoring','0') ON CONFLICT(key) DO UPDATE SET value='0'"
+            )
+            db.execute("DELETE FROM manual_checks")
 
     def products(self):
         with self.db() as db:
@@ -173,6 +217,7 @@ class Store:
         with self.db() as db:
             db.execute("UPDATE products SET enabled=? WHERE id=?", (int(enabled), pid))
             if not enabled:
+                db.execute("DELETE FROM manual_checks WHERE product_id=?", (pid,))
                 db.execute(
                     "UPDATE outbox SET state='cancelled',error='Товар на паузе' WHERE product_id=? AND state IN ('pending','blocked')",
                     (pid,),

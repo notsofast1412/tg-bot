@@ -25,6 +25,7 @@ class BrowserBridge:
             active = db.execute(
                 "SELECT COUNT(*) FROM check_jobs WHERE expires>?", (now,)
             ).fetchone()[0]
+            manual = db.execute("SELECT COUNT(*) FROM manual_checks").fetchone()[0]
             due = db.execute(
                 "SELECT COUNT(*) FROM products WHERE enabled=1 AND next_check<=? AND id NOT IN (SELECT product_id FROM check_jobs)",
                 (now,),
@@ -32,7 +33,8 @@ class BrowserBridge:
         return {
             "ok": True,
             "protocol": 2,
-            "monitoring": self.store.setting("monitoring", "0") == "1",
+            "monitoring": self.store.setting("monitoring", "0") == "1" or manual > 0,
+            "manual": manual,
             "parallelism": self.store.parallelism(),
             "active": active,
             "due": due,
@@ -54,13 +56,14 @@ class BrowserBridge:
                 ).fetchall()
                 db.execute("DELETE FROM check_jobs WHERE expires<=?", (now,))
             for old in expired:
+                request = self.store.manual_request(old["product_id"])
                 self.store.failure(
                     old["product_id"],
                     PriceError("Расширение не завершило проверку карточки"),
                     interval,
                 )
-            if self.store.setting("monitoring", "0") != "1":
-                return None
+                self.release(old["product_id"], request)
+            monitoring = self.store.setting("monitoring", "0") == "1"
             capacity = self.store.parallelism()
             cooldowns = {
                 m: int(self.store.setting(f"cooldown_{m}", "0")) for m in ("wb", "ozon")
@@ -78,11 +81,18 @@ class BrowserBridge:
                 ):
                     return None
                 p = db.execute(
-                    "SELECT * FROM products WHERE enabled=1 AND next_check<=? "
+                    "SELECT * FROM products WHERE enabled=1 AND ((? AND next_check<=?) OR id IN (SELECT product_id FROM manual_checks)) "
                     "AND id NOT IN (SELECT product_id FROM check_jobs) "
                     "AND ((market='ozon' AND ?<=?) OR (market='wb' AND ?<=?)) "
-                    "ORDER BY next_check,COALESCE((SELECT MAX(id) FROM checks WHERE product_id=products.id),0),id LIMIT 1",
-                    (now, cooldowns["ozon"], now, cooldowns["wb"], now),
+                    "ORDER BY (id IN (SELECT product_id FROM manual_checks)) DESC,next_check,COALESCE((SELECT MAX(id) FROM checks WHERE product_id=products.id),0),id LIMIT 1",
+                    (
+                        int(monitoring),
+                        now,
+                        cooldowns["ozon"],
+                        now,
+                        cooldowns["wb"],
+                        now,
+                    ),
                 ).fetchone()
                 if not p:
                     return None
@@ -128,14 +138,15 @@ class BrowserBridge:
                 or time.time() > job["expires"]
             ):
                 raise ValueError("Задание устарело или уже обработано")
+            request = self.store.manual_request(job["id"])
             p = self.store.product(job["id"])
             interval = self.store.interval()
             if (
                 not p
                 or not p["enabled"]
-                or self.store.setting("monitoring", "0") != "1"
+                or (self.store.setting("monitoring", "0") != "1" and not request)
             ):
-                self.release(job["id"])
+                self.release(job["id"], request)
                 return
             try:
                 ref = parse_ref(payload.get("url", ""))
@@ -184,7 +195,7 @@ class BrowserBridge:
                         str(payload.get("name", ""))[:300],
                         payload.get("price"),
                         seller=str(payload.get("seller", ""))[:50],
-                        source="Видимая цена с явной подписью типа оплаты, расширение браузера",
+                        source="Видимая цена с подтверждённым типом оплаты, расширение браузера",
                     )
                     if not snapshot.name:
                         raise PriceError("Название карточки не подтверждено")
@@ -206,11 +217,16 @@ class BrowserBridge:
                     interval,
                 )
             finally:
-                self.release(job["id"])
+                self.release(job["id"], request)
 
-    def release(self, pid):
+    def release(self, pid, request=None):
         with self.store.db() as db:
             db.execute("DELETE FROM check_jobs WHERE product_id=?", (pid,))
+            if request:
+                db.execute(
+                    "DELETE FROM manual_checks WHERE product_id=? AND request=?",
+                    (pid, request),
+                )
 
     def start(self):
         bridge = self

@@ -56,18 +56,44 @@
         price: {product: s.price?.product, currency: s.price?.currency || 'RUB'},
         ...(Array.isArray(s.stocks) ? {stocks: s.stocks.slice(0, 100).map(s => ({qty: s.qty}))} : {})}))}]};
   }
+  function rendered(node) {
+    if (!node?.getClientRects().length) return false;
+    const style = node.ownerDocument.defaultView.getComputedStyle(node);
+    return style.visibility !== 'hidden' && style.visibility !== 'collapse';
+  }
+  function struck(node, root) {
+    for (; node && root.contains(node); node = node.parentElement) {
+      if (node.matches('del,s,strike,.price-block__old-price') || node.ownerDocument.defaultView.getComputedStyle(node).textDecorationLine.includes('line-through')) return true;
+    }
+    return false;
+  }
+  function wbPrice(root) {
+    const labelled = labelledPrice(root, /без\s*(?:(?:wb|вб)\s*)?кошелька/iu);
+    if (labelled !== null) return labelled;
+    // WB also renders an unlabelled regular price beside its wallet price.
+    // Accept explicit, separate DOM roles only; neither their order nor their colour proves a price type.
+    const values = selector => [...root.querySelectorAll(selector)]
+      .filter(node => rendered(node) && !struck(node, root))
+      .map(node => ({node, prices: [...new Set(amounts(node.innerText || ''))]}));
+    const wallet = values('.price-block__wallet-price');
+    const regular = values('.price-block__final-price').filter(({node}) => !node.closest('.price-block__wallet-price'));
+    if (wallet.length !== 1 || regular.length !== 1 || wallet[0].prices.length !== 1 || regular[0].prices.length !== 1) return null;
+    if (regular[0].node.contains(wallet[0].node) || wallet[0].node.contains(regular[0].node)) return null;
+    const price = regular[0].prices[0], walletPrice = wallet[0].prices[0];
+    return price >= walletPrice ? price : null;
+  }
   function labelledPrice(root, label) {
     if (!root) return null;
     const found = new Set();
     for (const leaf of [root, ...root.querySelectorAll('*')]) {
-      const style = leaf.ownerDocument.defaultView.getComputedStyle(leaf);
-      if (!leaf.getClientRects().length || style.visibility === 'hidden' || style.visibility === 'collapse') continue;
+      if (!rendered(leaf) || struck(leaf, root)) continue;
       // Payment labels can contain nested spans/icons. Read their rendered text,
       // not just childless nodes, and never use display:none prices.
       const labelText = (leaf.innerText || '').replace(/[\u200B-\u200D\uFEFF]/g, '');
       if (!label.test(labelText)) continue;
       let node = leaf;
       for (let depth = 0; node && depth < 5 && root.contains(node); depth++, node = node.parentElement) {
+        if (struck(node, root)) break;
         const prices = [...new Set(amounts(node.innerText || ''))];
         if (prices.length > 1) break;
         if (prices.length === 1) { found.add(prices[0]); break; }
@@ -89,15 +115,31 @@
       }
     } else {
       const roots = doc.querySelectorAll('.price-block, .product-page__price-block');
-      // Only an explicit non-wallet label confirms this price; no "smallest price" heuristic.
+      const found = new Set();
       for (const root of roots) {
-        const price = labelledPrice(root, /без\s*(?:(?:wb|вб)\s*)?кошелька/iu);
-        if (price !== null) return {kind: 'visible', name: title, price, currency: 'RUB', price_kind: 'wb_product', seller: ''};
+        const price = wbPrice(root);
+        if (price !== null) found.add(price);
       }
+      if (found.size === 1) return {kind: 'visible', name: title, price: [...found][0], currency: 'RUB', price_kind: 'wb_product', seller: ''};
     }
     return null;
   }
-  const api = {ref, money, amounts, cleanOzon, cleanWb, visible};
+  function diagnose(doc, current) {
+    const selector = current.market === 'wb' ? '.price-block, .product-page__price-block' : '[data-widget="webPrice"]';
+    return {market: current.market, article: current.article, variant: current.variant,
+      titleFound: Boolean(doc.querySelector('h1')?.innerText?.trim()), matched: visible(doc, current),
+      // No HTML, links, cookies, customer names or delivery addresses leave the page.
+      roots: [...doc.querySelectorAll(selector)].slice(0, 5).map(root => ({
+        className: String(root.className).slice(0, 200),
+        prices: amounts(root.innerText || '').slice(0, 20),
+        hasNonWalletLabel: /без\s*(?:(?:wb|вб)\s*)?кошелька/iu.test(root.innerText || ''),
+        nodes: [...root.querySelectorAll('*')].filter(node => amounts(node.innerText || '').length === 1).slice(0, 40).map(node => ({
+          tag: node.tagName, className: String(node.className).slice(0, 200),
+          prices: amounts(node.innerText || ''), visible: rendered(node), struck: struck(node, root)
+        }))
+      }))};
+  }
+  const api = {ref, money, amounts, cleanOzon, cleanWb, visible, diagnose};
   globalThis.PaintWatchExtract = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

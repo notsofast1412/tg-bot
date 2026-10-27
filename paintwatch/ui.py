@@ -154,6 +154,18 @@ class Window:
             ("История", self.history),
         ):
             ttk.Button(bar, text=title, command=action).pack(side="left", padx=(6, 0))
+        scan_bar = ttk.Frame(self.products_tab)
+        scan_bar.pack(fill="x", pady=(0, 10))
+        ttk.Button(
+            scan_bar,
+            text="Проверить все сейчас",
+            style="Primary.TButton",
+            command=self.scan_all,
+        ).pack(side="left")
+        self.scan_status = tk.StringVar()
+        ttk.Label(scan_bar, textvariable=self.scan_status, style="Muted.TLabel").pack(
+            side="left", padx=12
+        )
         filters = ttk.Frame(self.products_tab)
         filters.pack(fill="x", pady=(0, 10))
         ttk.Combobox(
@@ -197,7 +209,7 @@ class Window:
             )
         ttk.Label(
             self.products_tab,
-            text="Проверки не чаще 10 минут. CAPTCHA проходится вручную в отдельном профиле браузера.",
+            text="«Проверить все сейчас» запускает разовый обход включённых товаров вне расписания. Паузы площадок сохраняются.",
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(10, 0))
         self.details = tk.StringVar(
@@ -235,9 +247,14 @@ class Window:
         self.tags_tree = self._table(
             self.tags_tab, [("name", "Тег", 220), ("threshold", "Порог", 200)]
         )
-        ttk.Button(
-            self.tags_tab, text="Изменить выбранный порог", command=self.edit_tag
-        ).pack(anchor="w", pady=10)
+        bar = ttk.Frame(self.tags_tab)
+        bar.pack(anchor="w", pady=10)
+        ttk.Button(bar, text="+ Добавить тег", command=self.add_tag).pack(
+            side="left", padx=(0, 8)
+        )
+        ttk.Button(bar, text="Изменить выбранный порог", command=self.edit_tag).pack(
+            side="left"
+        )
 
     def _settings(self):
         self.token = tk.StringVar()
@@ -461,7 +478,14 @@ class Window:
             self.store.setting("telegram_control_error")
             or "ЛС: сохраните токен, отправьте боту /id, укажите Ваш ID. Команды: /help"
         )
-        self.monitor_button.configure(text="⏸ Остановить" if active else "▶ Запустить")
+        self.scan_status.set(
+            f"Разовая проверка: осталось {load['manual']}"
+            if load["manual"]
+            else "Разовый обход не запущен"
+        )
+        self.monitor_button.configure(
+            text="⏸ Остановить" if active or load["manual"] else "▶ Запустить"
+        )
         self.show_details()
 
     def show_details(self):
@@ -476,10 +500,39 @@ class Window:
             )
 
     def toggle(self):
-        active = self.store.setting("monitoring", "0") != "1"
-        self.store.configure({"monitoring": int(active)})
-        self.status.set("Мониторинг включён" if active else "Мониторинг остановлен")
+        active = self.bridge.status()["monitoring"]
+        if active:
+            self.store.stop_monitoring()
+        else:
+            self.store.configure({"monitoring": 1})
+        self.status.set("Мониторинг остановлен" if active else "Мониторинг включён")
         self.refresh()
+
+    def scan_all(self):
+        count = self.store.request_scan()
+        self.status.set(
+            f"Разовая проверка: {count} товаров. Откройте Chrome с расширением"
+        )
+        self.refresh()
+
+    def add_tag(self):
+        from tkinter.simpledialog import askstring
+
+        name = askstring(
+            "Новый тег", "Название тега, например #montana:", parent=self.root
+        )
+        if name is None:
+            return
+        value = askstring("Порог тега", "Порог цены в рублях:", parent=self.root)
+        if value is None:
+            return
+        try:
+            tag = self.store.add_tag(name, money(value))
+            self.refresh()
+            self.tags_tree.selection_set(tag)
+            self.status.set(f"Добавлен тег {tag}")
+        except ValueError as error:
+            messagebox.showerror("Тег", str(error), parent=self.root)
 
     def add(self):
         ProductDialog(self)

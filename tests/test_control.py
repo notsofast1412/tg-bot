@@ -111,6 +111,19 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             self.control.execute("/add #bad https://www.ozon.ru/product/1/")
 
+    async def test_custom_tag_and_manual_scan_commands_do_not_start_periodic_monitoring(
+        self,
+    ):
+        self.control.execute("/tag #testpaint 270")
+        self.control.execute("/add #testpaint https://www.ozon.ru/product/1/")
+        self.assertEqual(self.store.products()[0]["threshold"], 27000)
+        self.assertIn("1", self.control.execute("/scan"))
+        self.assertTrue(self.bridge.status()["monitoring"])
+        self.assertEqual(self.store.setting("monitoring", "0"), "0")
+        self.assertIn("осталось 1", self.control.execute("/status"))
+        self.control.execute("/stop")
+        self.assertFalse(self.bridge.status()["monitoring"])
+
     async def test_interval_and_parallel_changes_keep_market_cooldown(self):
         self.control.execute("/add #arton https://www.ozon.ru/product/1/")
         self.control.execute("/run")
