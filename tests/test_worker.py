@@ -33,6 +33,31 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             bridge.start.assert_called_once()
             bridge.close.assert_called_once()
 
+    async def test_legacy_wb_collector_cannot_publish_an_ordinary_price_as_wallet_price(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(directory)
+            ref = parse_ref("708052242", "wb")
+            store.add([ref], "Paint", "#arton")
+            store.configure({"monitoring": 1, "collector": "playwright"})
+            collector = AsyncMock()
+            collector.fetch.return_value = Snapshot(ref, "Paint", 27000)
+            worker = Worker(store, SecretStore(directory))
+
+            async def finish(*args):
+                worker.stop()
+
+            with (
+                patch("paintwatch.worker.BrowserCollector", return_value=collector),
+                patch("paintwatch.worker.deliver", side_effect=finish),
+            ):
+                await worker.run()
+            collector.fetch.assert_not_awaited()
+            self.assertIsNone(store.products()[0]["price"])
+            self.assertEqual(store.queue(), [])
+            self.assertIn("WB Кошельком", store.products()[0]["issue"])
+
     async def test_scheduler_records_price_and_respects_restart_schedule(self):
         with tempfile.TemporaryDirectory() as directory:
             store = Store(directory)

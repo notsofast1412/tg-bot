@@ -8,7 +8,7 @@ import httpx
 from paintwatch.domain import Snapshot, parse_ref
 from paintwatch.platform import SecretStore
 from paintwatch.store import Store
-from paintwatch.telegram import Telegram, TelegramError, deliver
+from paintwatch.telegram import Telegram, TelegramError, deliver, notification
 
 
 TOKEN = "123456789:" + "A" * 35
@@ -33,6 +33,17 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             await api.call("getMe")
         self.assertFalse(error.exception.uncertain)
         await api.close()
+
+    async def test_wb_notification_labels_the_wallet_payment_type(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(directory)
+            ref = parse_ref("708052242", "wb")
+            store.add([ref], "Paint", "#arton")
+            store.record(store.products()[0]["id"], Snapshot(ref, "Paint", 26100), 0)
+            text = notification(store.queue()[0])
+            self.assertIn("Wildberries — по WB Карте (с WB Кошельком)", text)
+            self.assertIn("261.00", text)
+            self.assertNotIn("без WB Кошелька", text)
 
     async def test_private_reply_keyboard_is_serialized_without_changing_group_sends(
         self,

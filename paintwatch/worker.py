@@ -135,6 +135,10 @@ class Worker:
                             continue
                         self.events.put(("status", f"Проверка: {p['name']}"))
                         try:
+                            if p["market"] == "wb":
+                                raise PriceError(
+                                    "Для цены с WB Кошельком используйте расширение обычного браузера"
+                                )
                             snapshot = await collector.fetch(p)
                             self.store.record(p["id"], snapshot, interval)
                         except PriceError as error:

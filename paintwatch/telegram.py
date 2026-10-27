@@ -80,7 +80,7 @@ def notification(event):
     market = (
         "Ozon — цена по карте"
         if event["market"] == "ozon"
-        else "Wildberries — без WB Кошелька"
+        else "Wildberries — по WB Карте (с WB Кошельком)"
     )
     previous = event.get("previous_price")
     change = (

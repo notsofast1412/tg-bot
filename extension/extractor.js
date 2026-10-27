@@ -67,20 +67,36 @@
     }
     return false;
   }
-  function wbPrice(root) {
-    const labelled = labelledPrice(root, /без\s*(?:(?:wb|вб)\s*)?кошелька/iu);
-    if (labelled !== null) return labelled;
-    // WB also renders an unlabelled regular price beside its wallet price.
-    // Accept explicit, separate DOM roles only; neither their order nor their colour proves a price type.
-    const values = selector => [...root.querySelectorAll(selector)]
-      .filter(node => rendered(node) && !struck(node, root))
-      .map(node => ({node, prices: [...new Set(amounts(node.innerText || ''))]}));
-    const wallet = values('.price-block__wallet-price');
-    const regular = values('.price-block__final-price').filter(({node}) => !node.closest('.price-block__wallet-price'));
-    if (wallet.length !== 1 || regular.length !== 1 || wallet[0].prices.length !== 1 || regular[0].prices.length !== 1) return null;
-    if (regular[0].node.contains(wallet[0].node) || wallet[0].node.contains(regular[0].node)) return null;
-    const price = regular[0].prices[0], walletPrice = wallet[0].prices[0];
-    return price >= walletPrice ? price : null;
+  const WB_WALLET = '.price-block__wallet-price, [class*="priceBlockWalletPrice-"]';
+  function walletNodes(doc) {
+    const nodes = new Set([...doc.querySelectorAll(WB_WALLET)].filter(node => [...node.classList].some(name => name === 'price-block__wallet-price' || name.startsWith('priceBlockWalletPrice-'))));
+    // Another supplied WB layout puts its card price in a button immediately
+    // before the explicitly named non-card price. Do not search arbitrary red headings.
+    for (const regular of doc.querySelectorAll('[class*="priceBlockFinalPrice-"]')) {
+      if (![...regular.classList].some(name => name.startsWith('priceBlockFinalPrice-')) || !rendered(regular) || struck(regular, doc.documentElement)) continue;
+      const button = regular.previousElementSibling;
+      if (button?.tagName !== 'BUTTON' || !rendered(button)) continue;
+      const headings = [...button.querySelectorAll('h2')].filter(node => rendered(node) && !struck(node, doc.documentElement));
+      const regularPrices = [...new Set(amounts(regular.innerText || ''))];
+      const cardPrices = [...new Set(amounts(button.innerText || ''))];
+      if (headings.length !== 1 || regularPrices.length !== 1 || cardPrices.length !== 1) continue;
+      const headingPrices = [...new Set(amounts(headings[0].innerText || ''))];
+      if (headingPrices.length === 1 && headingPrices[0] === cardPrices[0] && cardPrices[0] <= regularPrices[0]) nodes.add(headings[0]);
+    }
+    return [...nodes];
+  }
+  function wbWalletPrice(doc) {
+    const found = new Set();
+    for (const node of walletNodes(doc)) {
+      if (!rendered(node) || struck(node, doc.documentElement)) continue;
+      const prices = [...new Set(amounts(node.innerText || ''))];
+      if (prices.length === 1) found.add(prices[0]);
+    }
+    for (const root of doc.querySelectorAll('.price-block, .product-page__price-block')) {
+      const price = labelledPrice(root, /(?:^|\s)с\s+(?:wb|вб)\s+кошельком/iu);
+      if (price !== null) found.add(price);
+    }
+    return found.size === 1 ? [...found][0] : null;
   }
   function labelledPrice(root, label) {
     if (!root) return null;
@@ -101,6 +117,17 @@
     }
     return found.size === 1 ? [...found][0] : null;
   }
+  function wbSeller(doc) {
+    const sellers = new Set();
+    for (const node of doc.querySelectorAll('a[href*="/seller/"]')) {
+      try {
+        const link = new URL(node.href);
+        const id = link.pathname.match(/^\/seller\/(\d+)\/?$/)?.[1];
+        if (id && link.protocol === 'https:' && ['www.wildberries.ru', 'wildberries.ru'].includes(link.hostname)) sellers.add(id);
+      } catch { /* Not a public seller link. */ }
+    }
+    return sellers.size === 1 ? [...sellers][0] : '';
+  }
   function visible(doc, current) {
     const title = doc.querySelector('h1')?.innerText?.trim();
     if (!title) return null;
@@ -114,19 +141,19 @@
         return {kind: 'visible', name: title, price, currency: 'RUB', price_kind: 'ozon_card', seller};
       }
     } else {
-      const roots = doc.querySelectorAll('.price-block, .product-page__price-block');
-      const found = new Set();
-      for (const root of roots) {
-        const price = wbPrice(root);
-        if (price !== null) found.add(price);
-      }
-      if (found.size === 1) return {kind: 'visible', name: title, price: [...found][0], currency: 'RUB', price_kind: 'wb_product', seller: ''};
+      const price = wbWalletPrice(doc);
+      if (price !== null) return {kind: 'visible', name: title, price, currency: 'RUB', price_kind: 'wb_wallet', seller: wbSeller(doc)};
     }
     return null;
   }
   function diagnose(doc, current) {
     const selector = current.market === 'wb' ? '.price-block, .product-page__price-block' : '[data-widget="webPrice"]';
-    return {market: current.market, article: current.article, variant: current.variant,
+    return {report_version: 1, market: current.market, article: current.article, variant: current.variant,
+      price_kind: current.market === 'wb' ? 'wb_wallet' : 'ozon_card',
+      walletNodes: current.market === 'wb' ? walletNodes(doc).slice(0, 20).map(node => ({
+        tag: node.tagName, className: String(node.className).slice(0, 300), prices: amounts(node.innerText || ''),
+        visible: rendered(node), struck: struck(node, doc.documentElement)
+      })) : [],
       titleFound: Boolean(doc.querySelector('h1')?.innerText?.trim()), matched: visible(doc, current),
       // No HTML, links, cookies, customer names or delivery addresses leave the page.
       roots: [...doc.querySelectorAll(selector)].slice(0, 5).map(root => ({

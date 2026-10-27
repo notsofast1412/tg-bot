@@ -74,7 +74,7 @@ class Window:
         ttk.Label(header, text="PaintWatch", style="Title.TLabel").pack(side="left")
         ttk.Label(
             header,
-            text="Wildberries · Ozon по карте\nУведомления в Telegram-группу",
+            text="WB с Кошельком · Ozon по карте\nУведомления в Telegram-группу",
             style="Muted.TLabel",
         ).pack(side="left", padx=24)
         self.monitor_button = ttk.Button(

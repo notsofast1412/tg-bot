@@ -9,7 +9,7 @@ import threading
 import time
 
 from .domain import PriceError, Snapshot, parse_ref
-from .parsers import parse_ozon, parse_wb
+from .parsers import parse_ozon
 
 
 class BrowserBridge:
@@ -33,6 +33,7 @@ class BrowserBridge:
         return {
             "ok": True,
             "protocol": 2,
+            "wb_price_kind": "wb_wallet",
             "monitoring": self.store.setting("monitoring", "0") == "1" or manual > 0,
             "manual": manual,
             "parallelism": self.store.parallelism(),
@@ -104,6 +105,7 @@ class BrowserBridge:
                     lease=secrets.token_urlsafe(24),
                     expires=now + self.store.check_timeout() + 15,
                     timeout_ms=self.store.check_timeout() * 1000,
+                    price_kind="wb_wallet" if p["market"] == "wb" else "ozon_card",
                     wb_dest=self.store.setting("wb_dest", "-1257786"),
                 )
                 db.execute(
@@ -168,23 +170,25 @@ class BrowserBridge:
                     )
                 if payload.get("kind") == "json":
                     data = payload.get("data", {})
-                    snapshot = (
-                        parse_ozon(data, ref)
-                        if ref.market == "ozon"
-                        else parse_wb(data, ref)
-                    )
+                    if ref.market == "wb":
+                        raise PriceError(
+                            "JSON с обычной ценой WB не подтверждает цену с WB Кошельком. Обновите расширение до 0.4.2"
+                        )
+                    snapshot = parse_ozon(data, ref)
                     snapshot.source = (
-                        "Ozon: цена по карте"
-                        if ref.market == "ozon"
-                        else "WB: без WB Кошелька"
-                    ) + ", расширение обычного браузера"
+                        "Ozon: цена по карте, расширение обычного браузера"
+                    )
                 elif payload.get("kind") == "visible":
-                    expected = "ozon_card" if ref.market == "ozon" else "wb_product"
+                    expected = "ozon_card" if ref.market == "ozon" else "wb_wallet"
                     if (
                         payload.get("price_kind") != expected
                         or payload.get("currency") != "RUB"
                     ):
-                        raise PriceError("Тип цены не подтверждён")
+                        raise PriceError(
+                            "WB: для цены с Кошельком обновите расширение до 0.4.2"
+                            if ref.market == "wb"
+                            else "Тип цены не подтверждён"
+                        )
                     if (
                         type(payload.get("price")) is not int
                         or not 0 < payload["price"] <= 10**10
@@ -195,7 +199,12 @@ class BrowserBridge:
                         str(payload.get("name", ""))[:300],
                         payload.get("price"),
                         seller=str(payload.get("seller", ""))[:50],
-                        source="Видимая цена с подтверждённым типом оплаты, расширение браузера",
+                        source=(
+                            "WB: цена с WB Кошельком"
+                            if ref.market == "wb"
+                            else "Ozon: цена по карте"
+                        )
+                        + ", видимая цена в расширении браузера",
                     )
                     if not snapshot.name:
                         raise PriceError("Название карточки не подтверждено")

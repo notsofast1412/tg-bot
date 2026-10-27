@@ -4,7 +4,7 @@ chrome.storage.local.get(['key', 'status']).then(saved => { key.value = saved.ke
 document.getElementById('connect').onclick = async () => {
   try {
     const result = await chrome.runtime.sendMessage({type: 'paintwatch.connect', key: key.value});
-    status.textContent = result.ok ? 'Подключено. Включите мониторинг в приложении' : result.error;
+    status.textContent = result?.ok ? 'Подключено. Запустите мониторинг или разовую проверку в приложении' : result?.error || 'Расширение не ответило. Обновите его в chrome://extensions';
   } catch { status.textContent = 'Не удалось подключиться'; }
 };
 document.getElementById('check').onclick = () => chrome.runtime.sendMessage({type: 'paintwatch.tick'});
@@ -15,9 +15,10 @@ document.getElementById('diagnose').onclick = async () => {
   const report = document.getElementById('report');
   report.hidden = false;
   try {
-    const [tab] = await chrome.tabs.query({active: true, currentWindow: true});
-    const data = await chrome.tabs.sendMessage(tab.id, {type: 'paintwatch.diagnose'});
+    report.value = 'Читаем блок цены…';
+    const data = await chrome.runtime.sendMessage({type: 'paintwatch.diagnoseActive'});
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('No report');
     report.value = JSON.stringify(data, null, 2);
     report.focus(); report.select();
-  } catch { report.value = 'Откройте карточку товара WB/Ozon, обновите страницу и повторите диагностику'; }
+  } catch { report.value = 'Расширение не вернуло отчёт. Нажмите ↻ для PaintWatch в chrome://extensions и повторите. Приложение для диагностики не требуется'; }
 };

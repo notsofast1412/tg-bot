@@ -22,13 +22,13 @@ function environment({monitoring = true, existing, count = 1, parallelism = 1, h
     fetch: async (url, options) => {
       assert.equal(new URL(url).origin, 'http://127.0.0.1:18765');
       calls.push({url, body: options.body ? JSON.parse(options.body) : null});
-      const data = url.endsWith('/status') ? {protocol: 2, monitoring, parallelism} : url.endsWith('/next') ? {job: jobs.shift() || null} : {ok: true};
+      const data = url.endsWith('/status') ? {protocol: 2, monitoring, parallelism, wb_price_kind: 'wb_wallet'} : url.endsWith('/next') ? {job: jobs.shift() || null} : {ok: true};
       return {ok: true, json: async () => data};
     },
     chrome: {
       storage: {local: storage(local), session: storage(session)},
       alarms: {onAlarm: listener, create() {}},
-      runtime: {onInstalled: listener, onStartup: listener, onMessage: {addListener: fn => { onMessage = fn; }}},
+      runtime: {getManifest: () => ({version: '0.4.2'}), onInstalled: listener, onStartup: listener, onMessage: {addListener: fn => { onMessage = fn; }}},
       tabs: {
         // status intentionally stays loading: images must not hold up price collection.
         get: async id => ({...tabs.get(id), status: 'loading'}),
@@ -158,4 +158,48 @@ test('the popup can reopen a closed card as a normal tab for manual checking', a
   assert.equal(e.created.at(-1).url, 'https://www.ozon.ru/product/1/');
   await e.context.tick(); await e.settle();
   assert.equal(e.tabs.size, 1);
+});
+
+test('diagnostics injects the current extractor and works without desktop or a content reply', async () => {
+  const e = environment();
+  e.context.chrome.tabs.query = async () => [{id: 81, url: 'https://www.wildberries.ru/catalog/708052242/detail.aspx'}];
+  const injections = [];
+  e.context.chrome.scripting = {executeScript: async options => {
+    injections.push(options);
+    return options.files ? [{frameId: 0}] : [{frameId: 0, result: {report_version: 1, market: 'wb', article: '708052242', matched: {price: 26100, price_kind: 'wb_wallet'}}}];
+  }};
+  e.context.fetch = async () => { throw new TypeError('Failed to fetch'); };
+  const data = await e.message({type: 'paintwatch.diagnoseActive'});
+  assert.equal(data.matched.price, 26100);
+  assert.equal(data.extension_version, '0.4.2');
+  assert.equal(injections.length, 2);
+  assert.equal(injections[0].files[0], 'extractor.js');
+  assert.equal(injections[0].target.tabId, 81);
+  assert.equal(typeof injections[1].func, 'function');
+  assert.equal(e.calls.length, 0); assert.equal(e.created.length, 0);
+});
+test('diagnostics rejects unsupported tabs and distinguishes denied script access', async () => {
+  const e = environment();
+  let injections = 0;
+  e.context.chrome.tabs.query = async () => [{id: 81, url: 'https://example.com/'}];
+  e.context.chrome.scripting = {executeScript: async () => { injections++; throw new Error('Denied'); }};
+  assert.match((await e.message({type: 'paintwatch.diagnoseActive'})).error, /Откройте карточку/);
+  assert.equal(injections, 0);
+  e.context.chrome.tabs.query = async () => [{id: 81, url: 'https://www.wildberries.ru/catalog/708052242/detail.aspx'}];
+  assert.match((await e.message({type: 'paintwatch.diagnoseActive'})).error, /Chrome не разрешил/);
+});
+test('an empty script result produces an actionable error rather than undefined', async () => {
+  const e = environment();
+  e.context.chrome.tabs.query = async () => [{id: 81, url: 'https://www.wildberries.ru/catalog/708052242/detail.aspx'}];
+  e.context.chrome.scripting = {executeScript: async () => [{frameId: 0}]};
+  assert.match((await e.message({type: 'paintwatch.diagnoseActive'})).error, /не вернул отчёт/);
+});
+test('desktop fetch failure explains the loopback connection and does not expose raw browser text', async () => {
+  const e = environment();
+  e.context.fetch = async () => { throw new TypeError('Failed to fetch'); };
+  await assert.rejects(e.context.api('/v1/status'), /Нет связи с PaintWatch.*127.0.0.1:18765/);
+  const response = await e.message({type: 'paintwatch.connect', key: 'fixture'});
+  assert.equal(response.ok, false);
+  assert.match(response.error, /Запустите PaintWatch.exe/);
+  assert.ok(!response.error.includes('Failed to fetch'));
 });

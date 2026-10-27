@@ -332,3 +332,44 @@ class BridgeTests(unittest.TestCase):
         restored.result(self.visible(job))
         self.assertEqual(restored.status()["manual"], 0)
         self.assertIsNone(restored.job())
+
+    def test_wb_wallet_price_is_required_and_non_wallet_or_json_prices_are_rejected(
+        self,
+    ):
+        ref = parse_ref("708052242", "wb")
+        self.store.add([ref], "", "#arton")
+        with self.store.db() as db:
+            db.execute("UPDATE products SET enabled=0 WHERE market='ozon'")
+        for kind in ("ordinary", "json", "wallet"):
+            job = self.bridge.job()
+            self.assertEqual(job["price_kind"], "wb_wallet")
+            payload = {
+                "id": job["id"],
+                "lease": job["lease"],
+                "url": job["url"],
+                "kind": "visible",
+                "name": "Краска",
+                "price": 26100,
+                "price_kind": "wb_wallet" if kind == "wallet" else "wb_product",
+                "currency": "RUB",
+            }
+            if kind == "json":
+                payload.update(
+                    kind="json",
+                    data={
+                        "products": [
+                            {"id": 708052242, "sizes": [{"price": {"product": 27000}}]}
+                        ]
+                    },
+                )
+            self.bridge.result(payload)
+            if kind == "wallet":
+                self.assertEqual(self.store.product(job["id"])["price"], 26100)
+                self.assertEqual(len(self.store.queue()), 1)
+                self.assertIn(
+                    "WB Кошельком", self.store.history(job["id"])[0]["source"]
+                )
+            else:
+                self.assertIsNone(self.store.product(job["id"])["price"])
+                self.assertEqual(self.store.queue(), [])
+                self.store.resume_after_verification(job["id"])

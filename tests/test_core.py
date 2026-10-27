@@ -470,6 +470,34 @@ class StoreTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(ValueError):
                 restored.add_tag(name, value)
 
+    def test_wb_payment_policy_change_resets_only_wb_price_series_and_cancels_old_events(
+        self,
+    ):
+        wb = parse_ref("708052242", "wb")
+        self.store.add([wb], "Paint", "#arton")
+        pid = self.store.products()[0]["id"]
+        self.store.record(pid, Snapshot(wb, "Paint", 27000), 600, 1000)
+        self.record(35000)
+        with self.store.db() as db:
+            db.execute("DELETE FROM settings WHERE key='wb_price_kind'")
+        restored = Store(self.temp.name)
+        self.assertIsNone(restored.product(pid)["price"])
+        self.assertIsNone(restored.product(pid)["alert_price"])
+        self.assertEqual(restored.product(pid)["next_check"], 0)
+        self.assertEqual(restored.product(pid)["failures"], 0)
+        self.assertEqual(restored.product(self.pid)["price"], 35000)
+        old_wb = next(e for e in restored.queue() if e["product_id"] == pid)
+        self.assertEqual(old_wb["state"], "cancelled")
+        self.assertEqual(len(restored.history(pid)), 1)
+        restored.record(pid, Snapshot(wb, "Paint", 26100), 600, 1001)
+        new_wb = restored.queue()[0]
+        self.assertEqual(new_wb["price"], 26100)
+        self.assertIsNone(new_wb["previous_price"])
+        self.assertEqual(Store(self.temp.name).product(pid)["price"], 26100)
+        self.assertEqual(
+            len(list((restored.directory / "backups").glob("*.sqlite3"))), 1
+        )
+
     def test_single_instance(self):
         with instance_lock(self.temp.name):
             with self.assertRaises(RuntimeError):

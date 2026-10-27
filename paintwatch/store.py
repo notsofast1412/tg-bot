@@ -20,7 +20,17 @@ class Store:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version not in (0, 1, 2, 3, 4):
                 raise RuntimeError("Эта база создана другой версией программы")
-            if version in (1, 2, 3):
+            previous_policy = (
+                db.execute(
+                    "SELECT value FROM settings WHERE key='wb_price_kind'"
+                ).fetchone()
+                if version == 4
+                else None
+            )
+            policy_change = version == 4 and (
+                not previous_policy or previous_policy[0] != "wb_wallet"
+            )
+            if version in (1, 2, 3) or policy_change:
                 self.backup()
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -82,6 +92,23 @@ class Store:
                 db.execute("UPDATE products SET alert_price=price WHERE below=1")
             db.execute("PRAGMA user_version=4")
             db.executemany("INSERT OR IGNORE INTO tags VALUES(?,?)", TAGS)
+            policy = db.execute(
+                "SELECT value FROM settings WHERE key='wb_price_kind'"
+            ).fetchone()
+            if not policy or policy[0] != "wb_wallet":
+                # A different payment type starts a new price series; keep the audit history.
+                db.execute(
+                    "UPDATE outbox SET state='cancelled',error='WB: выбран мониторинг цены с Кошельком' WHERE product_id IN (SELECT id FROM products WHERE market='wb') AND state IN ('pending','blocked')"
+                )
+                db.execute(
+                    "UPDATE products SET price=NULL,last_success=NULL,below=NULL,alert_price=NULL,next_check=0,failures=0,generation=generation+1,status='Ожидает цены с WB Кошельком',issue='' WHERE market='wb'"
+                )
+                db.execute(
+                    "DELETE FROM check_jobs WHERE product_id IN (SELECT id FROM products WHERE market='wb')"
+                )
+                db.execute(
+                    "INSERT INTO settings VALUES('wb_price_kind','wb_wallet') ON CONFLICT(key) DO UPDATE SET value='wb_wallet'"
+                )
 
     @contextmanager
     def db(self):

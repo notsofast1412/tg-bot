@@ -19,13 +19,41 @@ async function api(path, body) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
   try {
-    const response = await fetch(BASE + path, {method: body === undefined ? 'GET' : 'POST',
-      headers: {Authorization: `Bearer ${key}`, 'Content-Type': 'application/json'},
-      ...(body === undefined ? {} : {body: JSON.stringify(body)}), signal: controller.signal});
-    const data = await response.json();
+    let response;
+    try {
+      response = await fetch(BASE + path, {method: body === undefined ? 'GET' : 'POST',
+        headers: {Authorization: `Bearer ${key}`, 'Content-Type': 'application/json'},
+        ...(body === undefined ? {} : {body: JSON.stringify(body)}), signal: controller.signal});
+    } catch {
+      throw new Error(controller.signal.aborted ? 'PaintWatch не ответил за 8 секунд. Проверьте приложение' : 'Нет связи с PaintWatch по 127.0.0.1:18765. Запустите PaintWatch.exe и нажмите «Подключить»');
+    }
+    let data;
+    try { data = await response.json(); }
+    catch { throw new Error('Порт 18765 отвечает не как PaintWatch. Проверьте, какое приложение его использует'); }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Приложение вернуло неподтверждённый ответ');
     if (!response.ok) throw new Error(data.error || 'Данные задания не приняты приложением');
     return data;
   } finally { clearTimeout(timer); }
+}
+async function diagnoseActiveTab() {
+  const [tab] = await chrome.tabs.query({active: true, currentWindow: true});
+  try { PaintWatchExtract.ref(tab?.url); }
+  catch { return {error: 'Откройте карточку WB или Ozon в активной вкладке браузера'}; }
+  try {
+    // Read using the current packaged extractor, even in a tab opened before extension update.
+    await chrome.scripting.executeScript({target: {tabId: tab.id}, files: ['extractor.js']});
+    const frames = await chrome.scripting.executeScript({target: {tabId: tab.id}, func: () => {
+      try {
+        const parser = globalThis.PaintWatchExtract;
+        return parser.diagnose(document, parser.ref(location.href));
+      } catch { return {error: 'Не удалось прочитать блок цены. Дождитесь загрузки карточки и повторите'}; }
+    }});
+    const data = frames.find(frame => frame.frameId === 0)?.result;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return {error: 'Браузер не вернул отчёт. Проверьте доступ расширения к этой площадке'};
+    return {...data, extension_version: chrome.runtime.getManifest().version};
+  } catch {
+    return {error: 'Chrome не разрешил чтение карточки. Проверьте доступ PaintWatch к сайту в настройках расширения'};
+  }
 }
 async function showStatus(status) {
   await chrome.storage.local.set({status, updated: Date.now()});
@@ -130,7 +158,7 @@ async function tick() {
     const client = config.client || crypto.randomUUID();
     if (!config.client) await chrome.storage.local.set({client});
     const status = await api('/v1/status');
-    if (status.protocol !== 2) throw new Error('Обновите приложение PaintWatch до версии 0.3');
+    if (status.protocol !== 2 || status.wb_price_kind !== 'wb_wallet') throw new Error('Обновите приложение PaintWatch до версии 0.4.2');
     if (!status.monitoring) { await showStatus('Связь есть. Включите мониторинг в PaintWatch'); return; }
     for (let slot = 0; slot < Math.min(32, status.parallelism); slot++) {
       if (active.has(slot)) continue;
@@ -145,11 +173,15 @@ chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === 'paintwatch') ti
 chrome.runtime.onInstalled.addListener(() => { chrome.alarms.create('paintwatch', {periodInMinutes: 0.5}); tick(); });
 chrome.runtime.onStartup.addListener(() => { chrome.alarms.create('paintwatch', {periodInMinutes: 0.5}); tick(); });
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
+  if (message.type === 'paintwatch.diagnoseActive') {
+    diagnoseActiveTab().then(reply).catch(() => reply({error: 'Не удалось получить активную вкладку. Откройте карточку WB или Ozon'}));
+    return true;
+  }
   if (message.type === 'paintwatch.connect') {
     chrome.storage.local.set({key: message.key.trim(), enabled: true}).then(async () => {
       chrome.alarms.create('paintwatch', {periodInMinutes: 0.5});
-      try { const status = await api('/v1/status'); if (status.protocol !== 2) throw new Error(); await showStatus('Подключено'); reply({ok: true}); tick(); }
-      catch { reply({ok: false, error: 'Проверьте код и запустите PaintWatch 0.3'}); }
+      try { const status = await api('/v1/status'); if (status.protocol !== 2 || status.wb_price_kind !== 'wb_wallet') throw new Error('Обновите приложение PaintWatch до версии 0.4.2'); await showStatus('Подключено'); reply({ok: true}); tick(); }
+      catch (e) { const error = e.message || 'Запустите PaintWatch и проверьте код подключения'; await showStatus(error); reply({ok: false, error}); }
     });
     return true;
   }

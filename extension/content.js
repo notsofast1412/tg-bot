@@ -34,6 +34,9 @@
       });
       const early = await Promise.race([watcher.promise, grace]);
       if (early) return early;
+      if (current.market === 'wb') {
+        return (await watcher.promise) || error('Видимая цена с WB Кошельком не подтверждена. Откройте карточку и запустите диагностику цены в расширении');
+      }
       if (Date.now() >= deadline) return error('Время проверки истекло');
       const fallback = apiPrice(current, job, deadline, controller);
       const first = await Promise.race([watcher.promise, fallback]);
@@ -73,9 +76,7 @@
   async function apiPrice(current, job, deadline, controller) {
     // One regular same-origin request in the user's ordinary browser session.
     // No cookies or private page state are exported to the desktop application.
-    const path = current.market === 'ozon'
-      ? '/api/composer-api.bx/page/json/v2?' + new URLSearchParams({url: `/product/${current.article}/`})
-      : '/__internal/u-card/cards/v4/detail?' + new URLSearchParams({appType: '1', curr: 'rub', dest: job.wb_dest, spp: '30', nm: current.article});
+    const path = '/api/composer-api.bx/page/json/v2?' + new URLSearchParams({url: `/product/${current.article}/`});
     const timer = setTimeout(() => controller.abort(), Math.max(1, Math.min(5000, deadline - Date.now())));
     try {
       const response = await fetch(path, {credentials: 'same-origin', cache: 'no-store', signal: controller.signal});
@@ -98,7 +99,7 @@
         }
         return error(`Резервный API ${current.market.toUpperCase()} вернул ответ без данных JSON (HTTP ${response.status}); цена не подтверждена`);
       }
-      const data = current.market === 'ozon' ? parser.cleanOzon(raw, current.article) : parser.cleanWb(raw, current.article);
+      const data = parser.cleanOzon(raw, current.article);
       return data ? {kind: 'json', data} : error('SKU и тип цены в ответе не подтверждены');
     } catch { return error('Не удалось прочитать цену в браузере'); }
     finally { clearTimeout(timer); }
