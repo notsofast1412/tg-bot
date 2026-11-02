@@ -213,6 +213,53 @@ class BrowserSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.store.queue()), 1)
         self.assertEqual(len(requests), 1)
 
+    async def test_wb_accent_price_from_user_markup_reaches_store(self):
+        ref = parse_ref("708059747", "wb")
+        requests = []
+
+        async def route(request_route):
+            requests.append(request_route.request.url)
+            await request_route.fulfill(
+                status=200,
+                content_type="text/html; charset=utf-8",
+                body=(
+                    '<html><body><h1>Краска</h1><h2 class="mo-typography '
+                    "mo-typography_variant_title2 mo-typography_variable-weight_title2 "
+                    'mo-typography_variable mo-typography_colors_accent">278&nbsp;₽</h2>'
+                    '<span class="mo-typography_colors_primary">300 ₽</span>'
+                    "<del>400 ₽</del></body></html>"
+                ),
+            )
+
+        await self.page.route("**/*", route)
+        await self.page.goto(ref.url, wait_until="domcontentloaded")
+        await self.page.evaluate(
+            "window.chrome={runtime:{onMessage:{addListener:fn=>window.collectListener=fn}}}"
+        )
+        folder = Path(__file__).resolve().parent.parent / "extension"
+        await self.page.add_script_tag(path=str(folder / "extractor.js"))
+        await self.page.add_script_tag(path=str(folder / "content.js"))
+        diagnostic = await self.page.evaluate(
+            'PaintWatchExtract.diagnose(document,{market:"wb",article:"708059747",variant:""})'
+        )
+        self.assertEqual(len(diagnostic["walletNodes"]), 1)
+        self.assertIsNotNone(diagnostic["matched"])
+        self.assertEqual(diagnostic["matched"]["price"], 27800)
+        self.assertIsNone(diagnostic["reasonCode"])
+        self.store.add([ref], "", "#arton")
+        self.store.configure({"monitoring": 1})
+        bridge = BrowserBridge(self.store, "fixture")
+        job = bridge.job()
+        result = await self.page.evaluate(
+            """job => new Promise(resolve => collectListener({type:'paintwatch.collect',
+            job:{...job,deadline:Date.now()+3000}}, {}, resolve))""",
+            job,
+        )
+        self.assertEqual(result["price_kind"], "wb_wallet")
+        bridge.result({**result, "id": job["id"], "lease": job["lease"]})
+        self.assertEqual(self.store.product(job["id"])["price"], 27800)
+        self.assertEqual(len(requests), 1)
+
     async def test_wb_missing_title_does_not_make_unconfirmed_price_acceptable(self):
         await self.page.set_content(
             '<div style="color:red">261 ₽</div><span>270 ₽</span>'
@@ -242,6 +289,8 @@ class BrowserSessionTests(unittest.IsolatedAsyncioTestCase):
             '<div><button><p class="mo-typography_colors_danger">261 ₽</p></button></div><ins>270 ₽</ins>',
             '<span class="mo-typography_color_danger">261 ₽</span><span>270 ₽</span>',
             '<button class="mo-typography_colors_danger"><span class="mo-typography_colors_danger">261 ₽</span></button><span>270 ₽</span>',
+            '<h2 class="mo-typography_colors_accent">261&nbsp;₽</h2><ins class="mo-typography_colors_primary">270 ₽</ins>',
+            '<span class="mo-typography_colors_danger">261 ₽</span><span class="mo-typography_colors_accent">261 ₽</span><ins>270 ₽</ins>',
         ]
         for card, regular, old in ((261, 270, 379), (444, 664, 869)):
             for n, template in enumerate(fixtures):
@@ -303,6 +352,16 @@ class BrowserSessionTests(unittest.IsolatedAsyncioTestCase):
             '<span class="mo-typography_colors_danger">-15 ₽</span>',
             '<span class="mo-typography_colors_danger">15%</span>',
             '<button style="display:none"><h2 class="mo-typography_colors_danger">261 ₽</h2></button><ins>270 ₽</ins>',
+            '<span class="mo-typography_colors_accent" style="display:none">278 ₽</span><span>300 ₽</span>',
+            '<del class="mo-typography_colors_accent">278 ₽</del>',
+            '<span class="mo-typography_colors_accent" style="text-decoration:line-through">278 ₽</span>',
+            '<span class="mo-typography_colors_accent">278 ₽</span><span class="mo-typography_colors_accent">279 ₽</span>',
+            '<span class="mo-typography_colors_danger">261 ₽</span><span class="mo-typography_colors_accent">278 ₽</span>',
+            '<span class="prefixmo-typography_colors_accent">278 ₽</span>',
+            '<span class="mo-typography_colors_accent">Скидка 15 ₽</span>',
+            '<span class="mo-typography_colors_accent">-15 ₽</span>',
+            '<span class="mo-typography_colors_accent">15%</span>',
+            '<span class="mo-typography_colors_accent">278 ₽ 300 ₽</span>',
         ]
         for html in fixtures:
             with self.subTest(html=html):

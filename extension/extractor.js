@@ -67,7 +67,7 @@
     }
     return false;
   }
-  const WB_CARD = '.mo-typography_colors_danger, .mo-typography_color_danger';
+  const WB_CARD = '.mo-typography_colors_danger, .mo-typography_color_danger, .mo-typography_colors_accent';
   function cardAmount(text) {
     const normalized = String(text).replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
     const match = normalized.match(/^(\d[\d\s]*(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?)$/u);
