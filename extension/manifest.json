@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PaintWatch — цены WB и Ozon",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "minimum_chrome_version": "120",
   "description": "Проверка выбранных карточек в обычном браузере и передача цен локальному PaintWatch.",
   "permissions": ["storage", "alarms", "scripting"],
@@ -9,7 +9,7 @@
   "background": {"service_worker": "background.js"},
   "action": {"default_popup": "popup.html", "default_title": "PaintWatch"},
   "content_scripts": [{
-    "matches": ["https://www.ozon.ru/product/*", "https://www.wildberries.ru/catalog/*/detail.aspx*"],
+    "matches": ["https://www.ozon.ru/product/*", "https://www.ozon.ru/search/*", "https://www.wildberries.ru/catalog/*/detail.aspx*"],
     "js": ["extractor.js", "content.js"],
     "run_at": "document_end"
   }]

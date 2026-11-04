@@ -89,8 +89,10 @@ def parse_ozon(data, ref):
         pack=props.get("количество в упаковке", ""),
         source="Ozon: цена по карте, браузер",
     )
-    if len(prices) != 1 or prices[0].get("isAvailable") is False:
-        result.issue = "Цена отсутствует, неоднозначна или товар недоступен"
+    if len(prices) == 1 and prices[0].get("isAvailable") is False:
+        result.available = False
+    elif len(prices) != 1:
+        result.issue = "Цена отсутствует или неоднозначна"
     else:
         price = prices[0].get("cardPrice")
         if prices[0].get("currency", "RUB") not in ("RUB", "₽"):

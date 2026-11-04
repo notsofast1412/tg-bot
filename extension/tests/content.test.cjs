@@ -4,10 +4,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const {webcrypto: crypto} = require('node:crypto');
-async function collect({market = 'ozon', status = 200, body = '<html>Not JSON</html>', navigation = 200, visible = false, retryAfter = null, mutate = false, documentId, mutationDelay = 5, seller = false, timeout = 200} = {}) {
+async function collect({market = 'ozon', status = 200, body = '<html>Not JSON</html>', navigation = 200, visible = false, soldOut = false, redirect = false, retryAfter = null, mutate = false, documentId, mutationDelay = 5, seller = false, timeout = 200} = {}) {
   let callback, requests = 0;
   const article = market === 'wb' ? '708052242' : '196525150';
-  const url = market === 'wb' ? `https://www.wildberries.ru/catalog/${article}/detail.aspx` : `https://www.ozon.ru/product/${article}/`;
+  const url = market === 'wb' ? `https://www.wildberries.ru/catalog/${article}/detail.aspx` : redirect ? `https://www.ozon.ru/search/?product_id=${article}` : `https://www.ozon.ru/product/${article}/`;
   let observer, detected = visible;
   const price = {kind: 'visible', price: market === 'wb' ? 26100 : 38000, price_kind: market === 'wb' ? 'wb_wallet' : 'ozon_card', currency: 'RUB', name: 'Краска'};
   const context = vm.createContext({URL, URLSearchParams, AbortController, crypto,
@@ -24,6 +24,7 @@ async function collect({market = 'ozon', status = 200, body = '<html>Not JSON</h
   });
   for (const file of ['extractor.js', 'content.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '..', file), 'utf8'), context);
   context.PaintWatchExtract.visible = () => detected ? price : null;
+  context.PaintWatchExtract.soldOut = () => soldOut && detected ? {kind: 'sold_out', availability: 'out_of_stock', evidence: redirect ? 'ozon_sold_out_search' : 'product_sold_out_heading'} : null;
   const result = await new Promise(resolve => callback({type: 'paintwatch.collect', job: {market, article, variant: '', wb_dest: '-1257786', documentId, timeout_ms: timeout, deadline: Date.now() + timeout, seller: seller ? '123' : ''}}, {}, resolve));
   return {result, requests};
 }
@@ -90,4 +91,22 @@ test('WB does not substitute an API product price if no wallet price appears', a
   assert.equal(result.code, 'unavailable');
   assert.match(result.error, /WB Кошельком/);
   assert.equal(result.price, undefined); assert.equal(requests, 0);
+});
+test('a confirmed sold-out redirect returns immediately without seller or price requirements', async () => {
+  const {result, requests} = await collect({redirect: true, soldOut: true, visible: true, seller: true});
+  assert.equal(result.kind, 'sold_out'); assert.equal(result.availability, 'out_of_stock');
+  assert.equal(result.price, undefined); assert.equal(result.error, undefined); assert.equal(requests, 0);
+});
+test('a sold-out notice appearing later completes through the DOM observer without API fallback', async () => {
+  const {result, requests} = await collect({redirect: true, soldOut: true, mutate: true, mutationDelay: 70});
+  assert.equal(result.kind, 'sold_out'); assert.equal(requests, 0);
+});
+test('a search redirect alone does not prove that a product is sold out', async () => {
+  const {result, requests} = await collect({redirect: true});
+  assert.equal(result.kind, undefined); assert.equal(result.code, 'unavailable');
+  assert.match(result.error, /отсутствие исходного товара не подтверждено/); assert.equal(requests, 0);
+});
+test('access restrictions are not downgraded to a sold-out result', async () => {
+  const {result, requests} = await collect({redirect: true, soldOut: true, visible: true, navigation: 403});
+  assert.equal(result.code, 'access'); assert.equal(result.kind, undefined); assert.equal(requests, 0);
 });

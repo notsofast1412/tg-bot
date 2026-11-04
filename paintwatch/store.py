@@ -356,6 +356,24 @@ class Store:
                 or snapshot.ref.variant != p["variant"]
             ):
                 raise PriceError("Получены данные другой карточки", code="identity")
+            if snapshot.available is False:
+                if snapshot.price is not None:
+                    raise PriceError(
+                        "У закончившегося товара не может быть текущей цены"
+                    )
+                db.execute(
+                    "UPDATE outbox SET state='cancelled',error='Товар закончился' WHERE product_id=? AND state IN ('pending','blocked')",
+                    (pid,),
+                )
+                db.execute(
+                    "UPDATE products SET price=NULL,last_success=?,last_attempt=?,next_check=?,failures=0,status='Товар закончился',issue='',generation=generation+1,below=CASE WHEN alert_price IS NULL THEN NULL ELSE below END WHERE id=?",
+                    (now, now, now + interval, pid),
+                )
+                db.execute(
+                    "INSERT INTO checks(product_id,checked_at,ok,reason) VALUES(?,?,1,'Товар закончился')",
+                    (pid, now),
+                )
+                return
             if p["seller"] and snapshot.seller != p["seller"]:
                 raise PriceError(
                     "Продавец изменился или не подтверждён; проверьте карточку",

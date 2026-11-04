@@ -31,6 +31,7 @@ class Snapshot:
     pack: str = ""
     issue: str = ""
     source: str = ""
+    available: bool | None = None
 
 
 TAGS = [
@@ -104,6 +105,19 @@ def parse_ref(text, market=""):
             if match:
                 return ProductRef(
                     "ozon", match[1], f"https://www.ozon.ru/product/{match[1]}/"
+                )
+            product_ids = parse_qs(p.query, keep_blank_values=True).get(
+                "product_id", []
+            )
+            if (
+                p.path == "/search/"
+                and len(product_ids) == 1
+                and re.fullmatch(r"[0-9]+", product_ids[0])
+            ):
+                return ProductRef(
+                    "ozon",
+                    product_ids[0],
+                    f"https://www.ozon.ru/product/{product_ids[0]}/",
                 )
         if p.hostname in ("wildberries.ru", "www.wildberries.ru"):
             match = re.fullmatch(r"/catalog/(\d+)/detail\.aspx/?", p.path)

@@ -19,7 +19,11 @@
     const deadline = Math.min(job.deadline ? job.deadline - Math.min(150, (job.timeout_ms || 20000) * 0.05) : Date.now() + 20000, Date.now() + 120000);
     if (job.documentId && job.documentId !== documentId) return error('Документ карточки уже изменился');
     const read = () => {
-      const visible = parser.visible(document, current);
+      const actual = parser.ref(location.href);
+      if (actual.market !== job.market || actual.article !== job.article || actual.variant !== job.variant) return error('Открылась другая карточка');
+      const soldOut = parser.soldOut(document, actual);
+      if (soldOut) return soldOut;
+      const visible = parser.visible(document, actual);
       if (visible && (!job.seller || visible.seller) && !(current.market === 'wb' && current.variant)) return visible;
       return blocked();
     };
@@ -34,8 +38,10 @@
       });
       const early = await Promise.race([watcher.promise, grace]);
       if (early) return early;
-      if (current.market === 'wb') {
-        return (await watcher.promise) || error('Видимая цена с WB Кошельком не подтверждена. Откройте карточку и запустите диагностику цены в расширении');
+      if (current.market === 'wb' || parser.ref(location.href).view === 'sold_out_search') {
+        return (await watcher.promise) || error(current.market === 'wb'
+          ? 'Видимая цена с WB Кошельком не подтверждена. Откройте карточку и запустите диагностику цены в расширении'
+          : 'Ozon перешёл в поиск, но отсутствие исходного товара не подтверждено');
       }
       if (Date.now() >= deadline) return error('Время проверки истекло');
       const fallback = apiPrice(current, job, deadline, controller);

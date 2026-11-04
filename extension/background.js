@@ -62,6 +62,32 @@ async function ready(tab) {
   try { return await bounded(chrome.tabs.sendMessage(tab, {type: 'paintwatch.ready'}), 300); }
   catch { return null; }
 }
+async function waitForDocument(tab, job, deadline, previousDocument = '') {
+  while (Date.now() < deadline) {
+    const state = await ready(tab);
+    if (state?.documentId && state.documentId !== previousDocument) {
+      try {
+        const ref = PaintWatchExtract.ref(state.url);
+        if (ref.market === job.market && ref.article === job.article && ref.variant === job.variant) return {tab, documentId: state.documentId};
+      } catch { /* Still navigating, or a page not bound to this product. */ }
+    }
+    await pause(100);
+  }
+  throw new Error('Карточка не стала доступна за отведённое время');
+}
+async function collectTab(tab, documentId, job, deadline) {
+  while (Date.now() < deadline) {
+    try {
+      return await bounded(chrome.tabs.sendMessage(tab, {type: 'paintwatch.collect', job: {...job, deadline, documentId}}), deadline - Date.now());
+    } catch (error) {
+      // A product can redirect after its content script answered ready.
+      // Retry only in a new document verified against the same SKU and lease.
+      if (Date.now() >= deadline) throw error;
+      ({documentId} = await waitForDocument(tab, job, deadline, documentId));
+    }
+  }
+  throw new Error('Время проверки истекло');
+}
 async function closeOwned(owned, key) {
   let tab;
   try { tab = await chrome.tabs.get(owned.id); }
@@ -103,17 +129,7 @@ async function openJob(job, slot, deadline) {
   liveTabs.set(slot, owned);
   await chrome.storage.session.set({[`check_tab_${slot}`]: owned, owned});
   const navigationDeadline = Math.min(deadline, Date.now() + Math.min(12000, job.timeout_ms * 0.6));
-  while (Date.now() < navigationDeadline) {
-    const state = await ready(tab.id);
-    if (state?.documentId) {
-      try {
-        const ref = PaintWatchExtract.ref(state.url);
-        if (ref.market === job.market && ref.article === job.article && ref.variant === job.variant) return {tab: tab.id, documentId: state.documentId};
-      } catch { /* Still navigating. */ }
-    }
-    await pause(100);
-  }
-  throw new Error('Карточка не стала доступна за отведённое время');
+  return waitForDocument(tab.id, job, navigationDeadline);
 }
 async function runSlot(slot, client) {
   let job;
@@ -123,10 +139,10 @@ async function runSlot(slot, client) {
     const deadline = Date.now() + job.timeout_ms;
     await showStatus(`Проверяется ${job.market}: ${job.article} · активных слотов: ${active.size}`);
     const {tab, documentId} = await bounded(openJob(job, slot, deadline), deadline - Date.now());
-    const result = await bounded(chrome.tabs.sendMessage(tab, {type: 'paintwatch.collect', job: {...job, deadline, documentId}}), deadline - Date.now());
+    const result = await bounded(collectTab(tab, documentId, job, deadline), deadline - Date.now());
     if (!result || typeof result !== 'object') throw new Error('Расширение не смогло прочитать страницу');
     await api('/v1/result', {...result, id: job.id, lease: job.lease});
-    await showStatus(result.error || `Данные ${job.article} переданы. Результат смотрите в PaintWatch`);
+    await showStatus(result.error || (result.kind === 'sold_out' ? `${job.article}: товар закончился` : `Данные ${job.article} переданы. Результат смотрите в PaintWatch`));
     job = null;
     // Refill this slot immediately. A card never waits for the rest of its batch.
     return true;
@@ -158,7 +174,7 @@ async function tick() {
     const client = config.client || crypto.randomUUID();
     if (!config.client) await chrome.storage.local.set({client});
     const status = await api('/v1/status');
-    if (status.protocol !== 2 || status.wb_price_kind !== 'wb_wallet') throw new Error('Обновите приложение PaintWatch до версии 0.4.2');
+    if (status.protocol !== 2 || status.wb_price_kind !== 'wb_wallet' || status.availability_status !== true) throw new Error('Обновите приложение PaintWatch до версии 0.4.5');
     if (!status.monitoring) { await showStatus('Связь есть. Включите мониторинг в PaintWatch'); return; }
     for (let slot = 0; slot < Math.min(32, status.parallelism); slot++) {
       if (active.has(slot)) continue;
@@ -180,7 +196,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   if (message.type === 'paintwatch.connect') {
     chrome.storage.local.set({key: message.key.trim(), enabled: true}).then(async () => {
       chrome.alarms.create('paintwatch', {periodInMinutes: 0.5});
-      try { const status = await api('/v1/status'); if (status.protocol !== 2 || status.wb_price_kind !== 'wb_wallet') throw new Error('Обновите приложение PaintWatch до версии 0.4.2'); await showStatus('Подключено'); reply({ok: true}); tick(); }
+      try { const status = await api('/v1/status'); if (status.protocol !== 2 || status.wb_price_kind !== 'wb_wallet' || status.availability_status !== true) throw new Error('Обновите приложение PaintWatch до версии 0.4.5'); await showStatus('Подключено'); reply({ok: true}); tick(); }
       catch (e) { const error = e.message || 'Запустите PaintWatch и проверьте код подключения'; await showStatus(error); reply({ok: false, error}); }
     });
     return true;

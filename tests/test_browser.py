@@ -11,7 +11,7 @@ from playwright.async_api import async_playwright
 
 from paintwatch.browser import BrowserCollector
 from paintwatch.bridge import BrowserBridge
-from paintwatch.domain import PriceError, parse_ref
+from paintwatch.domain import PriceError, Snapshot, parse_ref
 from paintwatch.store import Store
 
 
@@ -258,6 +258,166 @@ class BrowserSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["price_kind"], "wb_wallet")
         bridge.result({**result, "id": job["id"], "lease": job["lease"]})
         self.assertEqual(self.store.product(job["id"])["price"], 27800)
+        self.assertEqual(len(requests), 1)
+
+    async def test_ozon_sold_out_search_redirect_reports_no_recommendation_price(self):
+        ref = parse_ref("5517253050", "ozon")
+        redirect = "https://www.ozon.ru/search/?deny_category_prediction=true&from_global=true&text=paint&product_id=5517253050"
+        requests = []
+
+        async def route(request_route):
+            requests.append(request_route.request.url)
+            if "/product/" in request_route.request.url:
+                await request_route.fulfill(
+                    status=200,
+                    content_type="text/html; charset=utf-8",
+                    body=f"<html><body><script>setTimeout(() => location.replace({json.dumps(redirect)}), 20)</script></body></html>",
+                )
+                return
+            await request_route.fulfill(
+                status=200,
+                content_type="text/html; charset=utf-8",
+                body=(
+                    "<html><body><aside><div><span>Товар</span> закончился</div>"
+                    '<a href="/product/5517253050/">Краска FLAME <s>648 ₽</s></a></aside>'
+                    '<main><h1>Похожие предложения</h1><div data-widget="webPrice">'
+                    "<span>278 ₽</span><span>с Ozon Картой</span></div>"
+                    '<a href="/product/1/">Другая краска 695 ₽</a></main></body></html>'
+                ),
+            )
+
+        await self.page.route("**/*", route)
+        await self.page.goto(ref.url, wait_until="domcontentloaded")
+        await self.page.wait_for_url(redirect, wait_until="domcontentloaded")
+        self.assertEqual(self.page.url, redirect)
+        await self.page.evaluate(
+            "window.chrome={runtime:{onMessage:{addListener:fn=>window.collectListener=fn}}}"
+        )
+        folder = Path(__file__).resolve().parent.parent / "extension"
+        await self.page.add_script_tag(path=str(folder / "extractor.js"))
+        await self.page.add_script_tag(path=str(folder / "content.js"))
+        diagnostic = await self.page.evaluate(
+            "PaintWatchExtract.diagnose(document,PaintWatchExtract.ref(location.href))"
+        )
+        self.assertEqual(diagnostic["matched"]["kind"], "sold_out")
+        self.assertIsNone(diagnostic["reasonCode"])
+        self.assertNotIn("price", diagnostic["matched"])
+        self.store.add([ref], "FLAME", "#arton")
+        self.store.record(
+            self.store.products()[0]["id"], Snapshot(ref, "FLAME", 64800), 600
+        )
+        self.store.request_scan()
+        bridge = BrowserBridge(self.store, "fixture")
+        job = bridge.job()
+        result = await self.page.evaluate(
+            """job => new Promise(resolve => collectListener({type:'paintwatch.collect',
+            job:{...job,deadline:Date.now()+3000}}, {}, resolve))""",
+            job,
+        )
+        self.assertEqual(result["kind"], "sold_out")
+        bridge.result({**result, "id": job["id"], "lease": job["lease"]})
+        product = self.store.product(job["id"])
+        self.assertEqual(product["status"], "Товар закончился")
+        self.assertIsNone(product["price"])
+        self.assertEqual(product["failures"], 0)
+        self.assertEqual(product["issue"], "")
+        self.assertEqual(self.store.queue(), [])
+        self.assertEqual(len(requests), 2)
+
+    async def test_search_recommendations_and_unrelated_text_do_not_prove_sold_out(
+        self,
+    ):
+        folder = Path(__file__).resolve().parent.parent / "extension"
+        current = {
+            "market": "ozon",
+            "article": "5517253050",
+            "variant": "",
+            "view": "sold_out_search",
+        }
+        for notice in (
+            "",
+            '<div style="display:none">Товар закончился</div>',
+            '<a href="/product/1/">Товар закончился</a>',
+            '<div><a href="/product/1/">Товар закончился</a></div>',
+            "<div><button>Нет в наличии</button></div>",
+            "<p>Покупатель написал: товар закончился вчера</p>",
+        ):
+            with self.subTest(notice=notice):
+                await self.page.set_content(
+                    '<h1>Поиск</h1><div data-widget="webPrice">278 ₽ с Ozon Картой</div>'
+                    + notice
+                )
+                await self.page.add_script_tag(path=str(folder / "extractor.js"))
+                self.assertIsNone(
+                    await self.page.evaluate(
+                        "current => PaintWatchExtract.soldOut(document,current)",
+                        current,
+                    )
+                )
+                self.assertIsNone(
+                    await self.page.evaluate(
+                        "current => PaintWatchExtract.visible(document,current)",
+                        current,
+                    )
+                )
+        await self.page.set_content(
+            "<h1>Краска</h1><section><p>Товар закончился</p></section>"
+        )
+        await self.page.add_script_tag(path=str(folder / "extractor.js"))
+        self.assertIsNone(
+            await self.page.evaluate(
+                'PaintWatchExtract.soldOut(document,{market:"ozon",article:"5517253050"})'
+            )
+        )
+
+    async def test_sold_out_primary_heading_takes_precedence_over_other_prices(self):
+        folder = Path(__file__).resolve().parent.parent / "extension"
+        for market in ("wb", "ozon"):
+            with self.subTest(market=market):
+                await self.page.set_content(
+                    '<h1>Товар закончился</h1><span class="mo-typography_colors_accent">278 ₽</span>'
+                    '<div data-widget="webPrice">278 ₽ с Ozon Картой</div>'
+                )
+                await self.page.add_script_tag(path=str(folder / "extractor.js"))
+                result = await self.page.evaluate(
+                    "market => PaintWatchExtract.diagnose(document,{market,article:'1',variant:''})",
+                    market,
+                )
+                self.assertEqual(result["matched"]["kind"], "sold_out")
+                self.assertNotIn("price", result["matched"])
+                self.assertIsNone(result["reasonCode"])
+
+    async def test_sold_out_search_spa_transition_is_read_without_fetching_prices(self):
+        requests = []
+
+        async def route(request_route):
+            requests.append(request_route.request.url)
+            await request_route.fulfill(
+                status=200,
+                content_type="text/html; charset=utf-8",
+                body="<html><body><main></main></body></html>",
+            )
+
+        await self.page.route("**/*", route)
+        await self.page.goto("https://www.ozon.ru/product/5517253050/")
+        await self.page.evaluate(
+            "window.chrome={runtime:{onMessage:{addListener:fn=>window.collectListener=fn}}}"
+        )
+        folder = Path(__file__).resolve().parent.parent / "extension"
+        await self.page.add_script_tag(path=str(folder / "extractor.js"))
+        await self.page.add_script_tag(path=str(folder / "content.js"))
+        result = await self.page.evaluate("""() => {
+            setTimeout(() => {
+                history.replaceState(null,'','/search/?product_id=5517253050');
+                document.querySelector('main').innerHTML = '<div>Товар закончился</div><h1>Поиск</h1><div data-widget="webPrice">278 ₽ с Ozon Картой</div>';
+            }, 40);
+            return new Promise(resolve => collectListener({type:'paintwatch.collect',job:{
+                market:'ozon',article:'5517253050',variant:'',timeout_ms:3000,deadline:Date.now()+3000
+            }}, {}, resolve));
+        }""")
+        self.assertEqual(result["kind"], "sold_out")
+        self.assertEqual(result["evidence"], "ozon_sold_out_search")
+        self.assertIn("/search/?product_id=5517253050", result["url"])
         self.assertEqual(len(requests), 1)
 
     async def test_wb_missing_title_does_not_make_unconfirmed_price_acceptable(self):

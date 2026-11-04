@@ -13,6 +13,17 @@ test('references reject other sites and preserve WB variant', () => {
   assert.equal(parser.ref('https://www.wildberries.ru/catalog/29220564/detail.aspx?size=2').variant,'2');
   assert.throws(() => parser.ref('https://www.ozon.ru.evil.test/product/1/'));
 });
+test('Ozon sold-out search redirects retain only the explicitly identified SKU', () => {
+  const ref = parser.ref('https://www.ozon.ru/search/?deny_category_prediction=true&text=paint&product_id=5517253050');
+  assert.deepEqual(ref, {market: 'ozon', article: '5517253050', variant: '', view: 'sold_out_search'});
+  for (const url of [
+    'https://www.ozon.ru/search/?text=paint',
+    'https://www.ozon.ru/search/?product_id=5517253050&product_id=1',
+    'https://www.ozon.ru/search/?product_id=5517253050&product_id=',
+    'https://www.ozon.ru/search/?product_id=invalid',
+    'https://www.ozon.ru.evil.test/search/?product_id=5517253050'
+  ]) assert.throws(() => parser.ref(url), url);
+});
 test('Ozon payload excludes private and ordinary-price fields', () => {
   const raw = {personal:'private', widgetStates:{'webStickyProducts-1':{sku:'196525150',name:'Paint',seller:{link:'/seller/shop-123/'},private:'secret'},'webPrice-1':{cardPrice:'655 ₽',price:'718 ₽',secret:'value'},'webUser-1':{name:'private'}}};
   const data = parser.cleanOzon(raw,'196525150');

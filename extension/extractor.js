@@ -7,6 +7,10 @@
     if (u.hostname === 'www.ozon.ru' && (m = u.pathname.match(/^\/product\/(?:[^/]+-)?(\d+)\/?$/))) {
       return {market: 'ozon', article: m[1], variant: ''};
     }
+    if (u.hostname === 'www.ozon.ru' && u.pathname === '/search/') {
+      const ids = u.searchParams.getAll('product_id');
+      if (ids.length === 1 && /^\d+$/.test(ids[0])) return {market: 'ozon', article: ids[0], variant: '', view: 'sold_out_search'};
+    }
     if (u.hostname === 'www.wildberries.ru' && (m = u.pathname.match(/^\/catalog\/(\d+)\/detail\.aspx\/?$/))) {
       const variant = u.searchParams.get('size') || '';
       if (!/^\d*$/.test(variant)) throw new Error('Неизвестный вариант товара');
@@ -119,7 +123,29 @@
     }
     return sellers.size === 1 ? [...sellers][0] : '';
   }
+  function soldOut(doc, current) {
+    const controls = 'a, [role="link"], button, [role="button"]';
+    const isLabel = node => node && rendered(node) && !node.closest(controls) && !node.querySelector(controls) &&
+      /^(?:товар закончился|этот товар закончился|нет в наличии)$/iu.test((node.innerText || '').replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\s+/gu, ' ').trim());
+    if (current.view === 'sold_out_search' && current.market === 'ozon') {
+      // Only the verified product_id redirect may use this label outside h1.
+      // Search cards and their prices are never used as the monitored product.
+      const walker = doc.createTreeWalker(doc.body || doc.documentElement, 4);
+      let text;
+      while ((text = walker.nextNode())) {
+        if (!/товар|наличии/iu.test(text.textContent || '')) continue;
+        let node = text.parentElement;
+        for (let depth = 0; node && depth < 3; depth++, node = node.parentElement) {
+          if (isLabel(node)) return {kind: 'sold_out', availability: 'out_of_stock', evidence: 'ozon_sold_out_search'};
+        }
+      }
+    } else if (isLabel(doc.querySelector('h1'))) {
+      return {kind: 'sold_out', availability: 'out_of_stock', evidence: 'product_sold_out_heading'};
+    }
+    return null;
+  }
   function visible(doc, current) {
+    if (current.view === 'sold_out_search' || soldOut(doc, current)) return null;
     const title = doc.querySelector('h1')?.innerText?.trim();
     if (current.market === 'ozon') {
       if (!title) return null;
@@ -139,7 +165,7 @@
     return null;
   }
   function diagnose(doc, current) {
-    const matched = visible(doc, current);
+    const matched = soldOut(doc, current) || visible(doc, current);
     const titleFound = Boolean(doc.querySelector('h1')?.innerText?.trim());
     const cardPrices = current.market === 'wb' ? [...wbPriceValues(doc)] : [];
     const reason = matched ? null : current.market === 'wb'
@@ -167,7 +193,7 @@
         }))
       }))};
   }
-  const api = {ref, money, amounts, cardAmount, cleanOzon, cleanWb, visible, diagnose};
+  const api = {ref, money, amounts, cardAmount, cleanOzon, cleanWb, visible, soldOut, diagnose};
   globalThis.PaintWatchExtract = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

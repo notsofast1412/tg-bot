@@ -22,13 +22,13 @@ function environment({monitoring = true, existing, count = 1, parallelism = 1, h
     fetch: async (url, options) => {
       assert.equal(new URL(url).origin, 'http://127.0.0.1:18765');
       calls.push({url, body: options.body ? JSON.parse(options.body) : null});
-      const data = url.endsWith('/status') ? {protocol: 2, monitoring, parallelism, wb_price_kind: 'wb_wallet'} : url.endsWith('/next') ? {job: jobs.shift() || null} : {ok: true};
+      const data = url.endsWith('/status') ? {protocol: 2, monitoring, parallelism, wb_price_kind: 'wb_wallet', availability_status: true} : url.endsWith('/next') ? {job: jobs.shift() || null} : {ok: true};
       return {ok: true, json: async () => data};
     },
     chrome: {
       storage: {local: storage(local), session: storage(session)},
       alarms: {onAlarm: listener, create() {}},
-      runtime: {getManifest: () => ({version: '0.4.4'}), onInstalled: listener, onStartup: listener, onMessage: {addListener: fn => { onMessage = fn; }}},
+      runtime: {getManifest: () => ({version: '0.4.5'}), onInstalled: listener, onStartup: listener, onMessage: {addListener: fn => { onMessage = fn; }}},
       tabs: {
         // status intentionally stays loading: images must not hold up price collection.
         get: async id => ({...tabs.get(id), status: 'loading'}),
@@ -171,7 +171,7 @@ test('diagnostics injects the current extractor and works without desktop or a c
   e.context.fetch = async () => { throw new TypeError('Failed to fetch'); };
   const data = await e.message({type: 'paintwatch.diagnoseActive'});
   assert.equal(data.matched.price, 26100);
-  assert.equal(data.extension_version, '0.4.4');
+  assert.equal(data.extension_version, '0.4.5');
   assert.equal(injections.length, 2);
   assert.equal(injections[0].files[0], 'extractor.js');
   assert.equal(injections[0].target.tabId, 81);
@@ -202,4 +202,60 @@ test('desktop fetch failure explains the loopback connection and does not expose
   assert.equal(response.ok, false);
   assert.match(response.error, /Запустите PaintWatch.exe/);
   assert.ok(!response.error.includes('Failed to fetch'));
+});
+test('a sold-out Ozon search redirect reports availability and closes the same owned tab', async () => {
+  const e = environment();
+  const create = e.context.chrome.tabs.create;
+  e.context.chrome.tabs.create = async options => {
+    const tab = await create(options);
+    e.tabs.set(tab.id, {id: tab.id, url: 'https://www.ozon.ru/search/?text=paint&product_id=1'});
+    return tab;
+  };
+  const send = e.context.chrome.tabs.sendMessage;
+  e.context.chrome.tabs.sendMessage = async (id, message) => message.type === 'paintwatch.ready' ? send(id, message) : {
+    kind: 'sold_out', availability: 'out_of_stock', evidence: 'ozon_sold_out_search', url: e.tabs.get(id).url
+  };
+  await e.context.tick(); await e.settle();
+  const sent = e.calls.find(c => c.url.endsWith('/result')).body;
+  assert.equal(sent.kind, 'sold_out'); assert.equal(sent.price, undefined); assert.equal(sent.error, undefined);
+  assert.equal(e.created.length, 1); assert.equal(e.closed.length, 1); assert.equal(e.tabs.size, 0);
+  assert.match(e.local.status, /товар закончился/);
+});
+test('a redirect during collection is retried only in the new document for the original SKU', async () => {
+  const e = environment();
+  const send = e.context.chrome.tabs.sendMessage;
+  let attempts = 0;
+  e.context.chrome.tabs.sendMessage = async (id, message) => {
+    if (message.type === 'paintwatch.ready') {
+      const state = await send(id, message);
+      return attempts ? {...state, documentId: 'redirect-document'} : state;
+    }
+    attempts++;
+    if (attempts === 1) {
+      e.tabs.set(id, {id, url: 'https://www.ozon.ru/search/?product_id=1'});
+      throw new Error('The message port closed before a response was received');
+    }
+    assert.equal(message.job.documentId, 'redirect-document');
+    return {kind: 'sold_out', availability: 'out_of_stock', evidence: 'ozon_sold_out_search', url: e.tabs.get(id).url};
+  };
+  await e.context.tick(); await e.settle();
+  assert.equal(attempts, 2); assert.equal(e.created.length, 1);
+  assert.equal(e.calls.filter(c => c.url.endsWith('/result')).length, 1);
+  assert.equal(e.calls.find(c => c.url.endsWith('/result')).body.kind, 'sold_out');
+  assert.equal(e.closed.length, 1);
+});
+test('orphaned sold-out tabs close, but unrelated search pages remain open', async () => {
+  const e = environment({count: 0});
+  for (const [slot, id, url] of [[0, 90, 'https://www.ozon.ru/search/?product_id=1'], [1, 91, 'https://www.ozon.ru/search/?product_id=2'], [2, 92, 'https://www.ozon.ru/search/?text=paint']]) {
+    e.session[`check_tab_${slot}`] = {id, url: 'https://www.ozon.ru/product/1/'};
+    e.tabs.set(id, {id, url});
+  }
+  await e.context.tick(); await e.settle();
+  assert.deepEqual(e.closed, [90]); assert.ok(e.tabs.has(91)); assert.ok(e.tabs.has(92));
+});
+test('a desktop lacking availability support asks for the application update before claiming a job', async () => {
+  const e = environment();
+  e.context.fetch = async () => ({ok: true, json: async () => ({protocol: 2, wb_price_kind: 'wb_wallet', monitoring: true, parallelism: 4})});
+  const response = await e.message({type: 'paintwatch.connect', key: 'fixture'});
+  assert.equal(response.ok, false); assert.match(response.error, /0\.4\.5/); assert.equal(e.created.length, 0);
 });

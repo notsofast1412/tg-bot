@@ -7,6 +7,7 @@ import re
 import secrets
 import threading
 import time
+from urllib.parse import urlsplit
 
 from .domain import PriceError, Snapshot, parse_ref
 from .parsers import parse_ozon
@@ -34,6 +35,7 @@ class BrowserBridge:
             "ok": True,
             "protocol": 2,
             "wb_price_kind": "wb_wallet",
+            "availability_status": True,
             "monitoring": self.store.setting("monitoring", "0") == "1" or manual > 0,
             "manual": manual,
             "parallelism": self.store.parallelism(),
@@ -168,7 +170,25 @@ class BrowserBridge:
                     raise PriceError(
                         str(payload["error"])[:300], code=code, retry_after=delay
                     )
-                if payload.get("kind") == "json":
+                search_redirect = urlsplit(payload.get("url", "")).path == "/search/"
+                if search_redirect and payload.get("kind") != "sold_out":
+                    raise PriceError(
+                        "Цены похожих товаров на странице поиска не принимаются"
+                    )
+                if payload.get("kind") == "sold_out":
+                    evidence = (
+                        "ozon_sold_out_search"
+                        if search_redirect and ref.market == "ozon"
+                        else "product_sold_out_heading"
+                    )
+                    if (
+                        payload.get("availability") != "out_of_stock"
+                        or payload.get("evidence") != evidence
+                        or payload.get("price") is not None
+                    ):
+                        raise PriceError("Отсутствие товара не подтверждено")
+                    snapshot = Snapshot(ref, p["name"], None, available=False)
+                elif payload.get("kind") == "json":
                     data = payload.get("data", {})
                     if ref.market == "wb":
                         raise PriceError(
