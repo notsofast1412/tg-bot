@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const {webcrypto: crypto} = require('node:crypto');
+const {FakeClock, flush} = require('./fake_clock.cjs');
 async function collect({market = 'ozon', status = 200, body = '<html>Not JSON</html>', navigation = 200, visible = false, soldOut = false, redirect = false, retryAfter = null, mutate = false, documentId, mutationDelay = 5, seller = false, timeout = 200} = {}) {
   let callback, requests = 0;
   const article = market === 'wb' ? '708052242' : '196525150';
@@ -109,4 +110,51 @@ test('a search redirect alone does not prove that a product is sold out', async 
 test('access restrictions are not downgraded to a sold-out result', async () => {
   const {result, requests} = await collect({redirect: true, soldOut: true, visible: true, navigation: 403});
   assert.equal(result.code, 'access'); assert.equal(result.kind, undefined); assert.equal(requests, 0);
+});
+function observedCollector() {
+  const clock = new FakeClock();
+  let callback, observer, reads = 0, price = null, result, disconnected = false;
+  const context = vm.createContext({URL, URLSearchParams, AbortController, crypto, Date: clock.Date,
+    setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+    document: {body: {innerText: 'Краска'}, documentElement: {}, querySelector: () => null},
+    location: new URL('https://www.wildberries.ru/catalog/708052242/detail.aspx'),
+    performance: {getEntriesByType: () => [{responseStatus: 200}]},
+    MutationObserver: class {constructor(fn) {observer = fn;} observe() {} disconnect() {disconnected = true;}},
+    fetch: () => {throw new Error('Unexpected marketplace API request');},
+    chrome: {runtime: {onMessage: {addListener: fn => {callback = fn;}}}}
+  });
+  for (const file of ['extractor.js', 'content.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '..', file), 'utf8'), context);
+  context.PaintWatchExtract.visible = () => {reads++; return price;};
+  context.PaintWatchExtract.soldOut = () => null;
+  callback({type: 'paintwatch.collect', job: {market: 'wb', article: '708052242', variant: '', timeout_ms: 1000, deadline: clock.now + 1000}}, {}, value => {result = value;});
+  return {
+    clock, reads: () => reads, result: () => result, disconnected: () => disconnected,
+    mutate: (available = false) => {
+      if (available) price = {kind: 'visible', price: 27800, price_kind: 'wb_wallet', name: 'Краска', currency: 'RUB'};
+      if (!disconnected) observer();
+    }
+  };
+}
+test('a burst of a thousand mutations is coalesced without a thousand price scans', async () => {
+  const e = observedCollector();
+  for (let n = 0; n < 1000; n++) e.mutate();
+  assert.equal(e.reads(), 3);
+  await e.clock.advance(49);
+  e.mutate(true);
+  await e.clock.advance(1);
+  assert.equal(e.result().price, 27800); assert.equal(e.reads(), 4);
+  assert.equal(e.disconnected(), true); assert.equal(e.clock.timers.size, 0);
+});
+test('the first price mutation is still collected immediately', async () => {
+  const e = observedCollector();
+  e.mutate(true); await flush();
+  assert.equal(e.result().price, 27800); assert.equal(e.clock.timers.size, 0);
+});
+test('a price arriving just before the deadline is flushed instead of being missed', async () => {
+  const e = observedCollector();
+  e.mutate(); await e.clock.advance(925);
+  e.mutate(true); await e.clock.advance(25);
+  assert.equal(e.result().price, 27800); assert.equal(e.clock.timers.size, 0);
+  const reads = e.reads(); await e.clock.advance(500);
+  assert.equal(e.reads(), reads);
 });

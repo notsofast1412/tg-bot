@@ -3,6 +3,8 @@ const BASE = 'http://127.0.0.1:18765';
 const active = new Map();
 const liveTabs = new Map();
 let cleanedLegacy = false;
+let cleanedRules = false;
+let displayedStatus;
 let pumping = false, wakeTimer;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function bounded(promise, ms) {
@@ -56,7 +58,25 @@ async function diagnoseActiveTab() {
   }
 }
 async function showStatus(status) {
+  if (displayedStatus === status) return;
   await chrome.storage.local.set({status, updated: Date.now()});
+  displayedStatus = status;
+}
+async function blockMedia(tabId) {
+  if (!chrome.declarativeNetRequest) throw new Error('Разрешите PaintWatch блокировать фото и видео в настройках расширения или отключите экономный режим');
+  const id = tabId % 2147483646 + 1;
+  await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds: [id], addRules: [{
+    id, priority: 1, action: {type: 'block'},
+    condition: {tabIds: [tabId], initiatorDomains: ['ozon.ru', 'wildberries.ru'], resourceTypes: ['image', 'media']}
+  }]});
+  return id;
+}
+async function clearMedia(owned) {
+  if (!owned.mediaRule) return true;
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds: [owned.mediaRule]});
+    return true;
+  } catch { return false; }
 }
 async function ready(tab) {
   try { return await bounded(chrome.tabs.sendMessage(tab, {type: 'paintwatch.ready'}), 300); }
@@ -89,6 +109,7 @@ async function collectTab(tab, documentId, job, deadline) {
   throw new Error('Время проверки истекло');
 }
 async function closeOwned(owned, key) {
+  const rulesCleared = await clearMedia(owned);
   let tab;
   try { tab = await chrome.tabs.get(owned.id); }
   catch { /* Already closed. */ }
@@ -103,7 +124,7 @@ async function closeOwned(owned, key) {
     try { await chrome.tabs.remove(owned.id); }
     catch { return; } // Keep ownership so the next cleanup can retry.
   }
-  if (key) await chrome.storage.session.remove(key);
+  if (key && rulesCleared) await chrome.storage.session.remove(key);
 }
 async function cleanupTabs() {
   const saved = await chrome.storage.session.get(null);
@@ -118,16 +139,38 @@ async function cleanupTabs() {
     await chrome.storage.session.remove('ownedTabs');
     cleanedLegacy = true;
   }
+  if (!cleanedRules && chrome.declarativeNetRequest) {
+    try {
+      const liveRules = new Set([...liveTabs.values()].map(tab => tab.mediaRule));
+      const rules = await chrome.declarativeNetRequest.getSessionRules();
+      const stale = rules.filter(rule => !liveRules.has(rule.id)).map(rule => rule.id);
+      if (stale.length) await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds: stale});
+      cleanedRules = true;
+    } catch { /* Retry cleanup after a transient Chrome API failure. */ }
+  }
 }
 async function openJob(job, slot, deadline) {
   const tab = await chrome.tabs.create({url: job.url, active: false});
-  const owned = {id: tab.id, url: job.url};
+  const owned = {id: tab.id, url: job.url, key: `check_tab_${tab.id}`};
   if (Date.now() >= deadline) {
     await closeOwned(owned);
     throw new Error('Время проверки истекло');
   }
   liveTabs.set(slot, owned);
-  await chrome.storage.session.set({[`check_tab_${slot}`]: owned, owned});
+  const stillLive = async () => {
+    if (liveTabs.get(slot) === owned && Date.now() < deadline) return;
+    await closeOwned(owned, owned.key);
+    throw new Error('Время проверки истекло');
+  };
+  await chrome.storage.session.set({[owned.key]: owned, owned});
+  await stillLive();
+  const config = await chrome.storage.local.get('lightweight');
+  if (config.lightweight !== false) {
+    owned.mediaRule = await blockMedia(tab.id);
+    await stillLive();
+    await chrome.storage.session.set({[owned.key]: owned, owned});
+    await stillLive();
+  }
   const navigationDeadline = Math.min(deadline, Date.now() + Math.min(12000, job.timeout_ms * 0.6));
   return waitForDocument(tab.id, job, navigationDeadline);
 }
@@ -155,7 +198,7 @@ async function runSlot(slot, client) {
   } finally {
     const owned = liveTabs.get(slot);
     if (owned) {
-      await closeOwned(owned, `check_tab_${slot}`);
+      await closeOwned(owned, owned.key);
       liveTabs.delete(slot);
     }
   }
@@ -176,6 +219,7 @@ async function tick() {
     const status = await api('/v1/status');
     if (status.protocol !== 2 || status.wb_price_kind !== 'wb_wallet' || status.availability_status !== true) throw new Error('Обновите приложение PaintWatch до версии 0.4.5');
     if (!status.monitoring) { await showStatus('Связь есть. Включите мониторинг в PaintWatch'); return; }
+    if (status.ready === 0) return;
     for (let slot = 0; slot < Math.min(32, status.parallelism); slot++) {
       if (active.has(slot)) continue;
       const task = runSlot(slot, client);

@@ -58,24 +58,31 @@
     }
   }
   function watch(read, ms) {
-    let timer, observer, finish;
+    let timer, observer, finish, checkTimer;
+    const until = Date.now() + ms;
     const promise = new Promise(resolve => {
-      let done = false;
+      let done = false, observed = false;
       finish = value => {
         if (done) return;
         done = true;
         clearTimeout(timer);
+        clearTimeout(checkTimer);
         observer?.disconnect();
         resolve(value);
       };
-      observer = new MutationObserver(() => {
+      const check = () => {
+        clearTimeout(checkTimer);
+        checkTimer = undefined;
         try { const value = read(); if (value) finish(value); }
         catch { finish(error('Не удалось распознать изменившийся блок цены')); }
+      };
+      observer = new MutationObserver(() => {
+        if (!observed) { observed = true; check(); }
+        else if (checkTimer === undefined) checkTimer = setTimeout(check, Math.max(0, Math.min(50, until - Date.now())));
       });
       observer.observe(document.documentElement, {childList: true, subtree: true, characterData: true, attributes: true});
-      timer = setTimeout(() => finish(null), ms);
-      const value = read();
-      if (value) finish(value);
+      timer = setTimeout(() => { check(); finish(null); }, ms);
+      check();
     });
     return {promise, stop: () => finish(null)};
   }

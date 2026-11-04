@@ -118,7 +118,9 @@ class TelegramControl:
                     0,
                     "Расширение Chrome не отвечает более 90 секунд. Проверьте браузер и подключение",
                 )
-        for event in reversed(self.store.queue()):
+        for event in reversed(
+            self.store.queue(states=("pending", "blocked", "uncertain"))
+        ):
             if event["state"] in ("blocked", "uncertain") or (
                 event["state"] == "pending" and event["error"]
             ):
@@ -156,6 +158,17 @@ class TelegramControl:
         if command == "/status":
             products = self.store.products()
             status = self.bridge.status() if self.bridge else {"active": 0, "due": 0}
+            performance = status.get("performance", {})
+            average = performance.get("average_seconds")
+            cycle = performance.get("estimated_cycle_seconds")
+            speed = (
+                f"\nЗа {performance['window_seconds']} с: успешно {performance['successful']} из {performance['completed']} проверок"
+                f"\nСредняя проверка: {average if average is not None else '—'} с · темп: {performance['per_minute']} товаров/мин"
+                f"\nРасчёт обхода без пауз: {cycle if cycle is not None else '—'} с"
+                f"\nЕщё не проверено: {performance['unchecked']} · возраст старейшего результата: {performance['oldest_success_age'] if performance['oldest_success_age'] is not None else '—'} с"
+                if performance
+                else ""
+            )
             return (
                 f"Мониторинг: {'включён' if self.store.setting('monitoring', '0') == '1' else 'остановлен'}\n"
                 f"Товаров: {len(products)}, включено: {sum(p['enabled'] for p in products)}\n"
@@ -163,7 +176,7 @@ class TelegramControl:
                 f"Разовый обход: осталось {status.get('manual', 0)}\n"
                 f"Интервал: {self.store.interval()} с (0 = непрерывно)\n"
                 f"Параллельно: {self.store.parallelism()}, лимит: {self.store.check_timeout()} с\n"
-                f"Проблем: {len(self.problems())}"
+                f"Проблем: {len(self.problems())}{speed}"
             )
         if command in ("/run", "/stop"):
             if command == "/stop":

@@ -1,6 +1,7 @@
 """Authenticated loopback link to a user-installed browser extension."""
 
 import hmac
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import re
@@ -19,9 +20,36 @@ class BrowserBridge:
         self.server = None
         self.thread = None
         self.lock = threading.Lock()
+        self.seen_lock = threading.Lock()
+        self.last_seen = None
+        self.started = time.time()
+        self.recent = deque(maxlen=4096)
+
+    def touch(self):
+        with self.seen_lock:
+            now = time.monotonic()
+            if self.last_seen is None or now - self.last_seen >= 10:
+                self.store.configure({"extension_seen": int(time.time())})
+                self.last_seen = now
+
+    def timing(self, job, successful):
+        now = time.time()
+        created = job.get("created_at")
+        duration = max(0, now - created) if type(created) in (int, float) else None
+        self.recent.append((now, successful, duration))
 
     def status(self):
         now = int(time.time())
+        settings = self.store.settings(
+            {
+                "monitoring": "0",
+                "parallelism": "4",
+                "cooldown_ozon": "0",
+                "cooldown_wb": "0",
+            }
+        )
+        capacity = max(1, min(32, int(settings["parallelism"])))
+        monitoring = settings["monitoring"] == "1"
         with self.store.db() as db:
             active = db.execute(
                 "SELECT COUNT(*) FROM check_jobs WHERE expires>?", (now,)
@@ -31,16 +59,54 @@ class BrowserBridge:
                 "SELECT COUNT(*) FROM products WHERE enabled=1 AND next_check<=? AND id NOT IN (SELECT product_id FROM check_jobs)",
                 (now,),
             ).fetchone()[0]
+            ready = db.execute(
+                "SELECT COUNT(*) FROM products WHERE enabled=1 AND ((? AND next_check<=?) OR id IN (SELECT product_id FROM manual_checks)) AND id NOT IN (SELECT product_id FROM check_jobs WHERE expires>?) AND ((market='ozon' AND ?<=?) OR (market='wb' AND ?<=?))",
+                (
+                    int(monitoring),
+                    now,
+                    now,
+                    int(settings["cooldown_ozon"]),
+                    now,
+                    int(settings["cooldown_wb"]),
+                    now,
+                ),
+            ).fetchone()[0]
+            coverage = db.execute(
+                "SELECT COUNT(*) enabled,COALESCE(SUM(last_success IS NULL),0) unchecked,MIN(last_success) oldest FROM products WHERE enabled=1"
+            ).fetchone()
+        with self.lock:
+            samples = [sample for sample in self.recent if sample[0] >= now - 300]
+        durations = [sample[2] for sample in samples if sample[2] is not None]
+        window = max(1, min(300, now - int(self.started)))
+        successful = sum(sample[1] for sample in samples)
+        average = sum(durations) / len(durations) if durations else None
         return {
             "ok": True,
             "protocol": 2,
             "wb_price_kind": "wb_wallet",
             "availability_status": True,
-            "monitoring": self.store.setting("monitoring", "0") == "1" or manual > 0,
+            "monitoring": monitoring or manual > 0,
             "manual": manual,
-            "parallelism": self.store.parallelism(),
+            "parallelism": capacity,
             "active": active,
             "due": due,
+            "ready": ready if active < capacity else 0,
+            "performance": {
+                "window_seconds": window,
+                "completed": len(samples),
+                "successful": successful,
+                "per_minute": round(successful * 60 / window, 1),
+                "average_seconds": round(average, 2) if average is not None else None,
+                "estimated_cycle_seconds": round(
+                    coverage["enabled"] * average / capacity
+                )
+                if average is not None
+                else None,
+                "unchecked": coverage["unchecked"],
+                "oldest_success_age": max(0, now - coverage["oldest"])
+                if coverage["oldest"] is not None
+                else None,
+            },
         }
 
     def job(self, client="local", slot=0):
@@ -52,10 +118,22 @@ class BrowserBridge:
             raise ValueError("Неверный слот")
         with self.lock:
             now = int(time.time())
-            interval = self.store.interval()
+            settings = self.store.settings(
+                {
+                    "interval": "600",
+                    "monitoring": "0",
+                    "parallelism": "4",
+                    "check_timeout": "20",
+                    "cooldown_ozon": "0",
+                    "cooldown_wb": "0",
+                    "wb_dest": "-1257786",
+                }
+            )
+            interval = max(0, int(settings["interval"]))
+            timeout = max(1, min(120, int(settings["check_timeout"])))
             with self.store.db() as db:
                 expired = db.execute(
-                    "SELECT product_id FROM check_jobs WHERE expires<=?", (now,)
+                    "SELECT product_id,payload FROM check_jobs WHERE expires<=?", (now,)
                 ).fetchall()
                 db.execute("DELETE FROM check_jobs WHERE expires<=?", (now,))
             for old in expired:
@@ -66,11 +144,10 @@ class BrowserBridge:
                     interval,
                 )
                 self.release(old["product_id"], request)
-            monitoring = self.store.setting("monitoring", "0") == "1"
-            capacity = self.store.parallelism()
-            cooldowns = {
-                m: int(self.store.setting(f"cooldown_{m}", "0")) for m in ("wb", "ozon")
-            }
+                self.timing(json.loads(old["payload"]), False)
+            monitoring = settings["monitoring"] == "1"
+            capacity = max(1, min(32, int(settings["parallelism"])))
+            cooldowns = {m: int(settings[f"cooldown_{m}"]) for m in ("wb", "ozon")}
             with self.store.db() as db:
                 db.execute("BEGIN IMMEDIATE")
                 if (
@@ -105,10 +182,11 @@ class BrowserBridge:
                 }
                 job.update(
                     lease=secrets.token_urlsafe(24),
-                    expires=now + self.store.check_timeout() + 15,
-                    timeout_ms=self.store.check_timeout() * 1000,
+                    expires=now + timeout + 15,
+                    timeout_ms=timeout * 1000,
+                    created_at=time.time(),
                     price_kind="wb_wallet" if p["market"] == "wb" else "ozon_card",
-                    wb_dest=self.store.setting("wb_dest", "-1257786"),
+                    wb_dest=settings["wb_dest"],
                 )
                 db.execute(
                     "INSERT INTO check_jobs VALUES(?,?,?,?,?,?)",
@@ -152,6 +230,7 @@ class BrowserBridge:
             ):
                 self.release(job["id"], request)
                 return
+            successful = False
             try:
                 ref = parse_ref(payload.get("url", ""))
                 if (ref.market, ref.article, ref.variant) != (
@@ -231,6 +310,7 @@ class BrowserBridge:
                 else:
                     raise PriceError("Расширение не подтвердило источник цены")
                 self.store.record(p["id"], snapshot, interval)
+                successful = snapshot.price is not None or snapshot.available is False
             except PriceError as error:
                 self.store.failure(p["id"], error, interval)
                 if error.code in ("access", "rate_limit"):
@@ -247,6 +327,7 @@ class BrowserBridge:
                 )
             finally:
                 self.release(job["id"], request)
+                self.timing(job, successful)
 
     def release(self, pid, request=None):
         with self.store.db() as db:
@@ -315,7 +396,7 @@ class BrowserBridge:
                 if not self.authorized():
                     self.reply(403, {"error": "Код подключения не принят"})
                 elif self.path == "/v1/status":
-                    bridge.store.configure({"extension_seen": int(time.time())})
+                    bridge.touch()
                     self.reply(200, bridge.status())
                 else:
                     self.reply(404, {"error": "Not found"})
@@ -332,7 +413,7 @@ class BrowserBridge:
                     payload = json.loads(self.rfile.read(size) or b"{}")
                     if not isinstance(payload, dict):
                         raise ValueError
-                    bridge.store.configure({"extension_seen": int(time.time())})
+                    bridge.touch()
                     if self.path == "/v1/next":
                         if payload.get("protocol") != 2:
                             self.reply(

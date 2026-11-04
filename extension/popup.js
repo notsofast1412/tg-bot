@@ -1,6 +1,13 @@
 const key = document.getElementById('key');
 const status = document.getElementById('status');
-chrome.storage.local.get(['key', 'status']).then(saved => { key.value = saved.key || ''; status.textContent = saved.status || 'Вставьте код подключения'; });
+const lightweight = document.getElementById('lightweight');
+chrome.storage.local.get(['key', 'status', 'lightweight']).then(saved => { key.value = saved.key || ''; status.textContent = saved.status || 'Вставьте код подключения'; lightweight.checked = saved.lightweight !== false; });
+lightweight.onchange = async () => {
+  try {
+    await chrome.storage.local.set({lightweight: lightweight.checked});
+    status.textContent = 'Настройка применяется к новым проверкам';
+  } catch { status.textContent = 'Не удалось сохранить настройку загрузки фото и видео'; }
+};
 document.getElementById('connect').onclick = async () => {
   try {
     const result = await chrome.runtime.sendMessage({type: 'paintwatch.connect', key: key.value});

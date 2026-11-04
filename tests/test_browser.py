@@ -551,6 +551,37 @@ class BrowserSessionTests(unittest.IsolatedAsyncioTestCase):
         await self.pw.stop()
         self.temp.cleanup()
 
+    async def test_price_can_be_read_when_gallery_images_and_media_are_unavailable(
+        self,
+    ):
+        blocked = []
+
+        async def route(request_route):
+            if request_route.request.resource_type in ("image", "media"):
+                blocked.append(request_route.request.resource_type)
+                await request_route.abort()
+                return
+            await request_route.fulfill(
+                status=200,
+                content_type="text/html; charset=utf-8",
+                body=(
+                    '<html><h1>Краска</h1><img src="/gallery.jpg">'
+                    '<div data-widget="webPrice"><span>278 ₽</span><span>с Ozon Картой</span></div></html>'
+                ),
+            )
+
+        await self.page.route("**/*", route)
+        await self.page.goto(
+            "https://www.ozon.ru/product/196525150/", wait_until="load"
+        )
+        folder = Path(__file__).resolve().parent.parent / "extension"
+        await self.page.add_script_tag(path=str(folder / "extractor.js"))
+        result = await self.page.evaluate(
+            "PaintWatchExtract.visible(document,PaintWatchExtract.ref(location.href))"
+        )
+        self.assertEqual(result["price"], 27800)
+        self.assertEqual(blocked, ["image"])
+
     async def test_ozon_same_browser_session_and_card_price(self):
         requests = []
 

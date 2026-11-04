@@ -83,9 +83,8 @@
   function wbPriceValues(doc) {
     const found = new Set();
     for (const node of walletNodes(doc)) {
-      if (!rendered(node) || struck(node, doc.documentElement)) continue;
       const price = cardAmount(node.innerText || '');
-      if (price !== null) found.add(price);
+      if (price !== null && rendered(node) && !struck(node, doc.documentElement)) found.add(price);
     }
     return found;
   }
@@ -97,11 +96,11 @@
     if (!root) return null;
     const found = new Set();
     for (const leaf of [root, ...root.querySelectorAll('*')]) {
-      if (!rendered(leaf) || struck(leaf, root)) continue;
       // Payment labels can contain nested spans/icons. Read their rendered text,
       // not just childless nodes, and never use display:none prices.
       const labelText = ((leaf.innerText || '') + ' ' + (leaf.getAttribute('aria-label') || '')).replace(/[\u200B-\u200D\uFEFF]/g, '');
       if (!label.test(labelText)) continue;
+      if (!rendered(leaf) || struck(leaf, root)) continue;
       let node = leaf;
       for (let depth = 0; node && depth < 5 && root.contains(node); depth++, node = node.parentElement) {
         if (struck(node, root)) break;

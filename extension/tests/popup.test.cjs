@@ -4,18 +4,18 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 function popup(reply) {
-  const calls = [], elements = {};
-  for (const id of ['key', 'status', 'connect', 'check', 'open', 'diagnose', 'report']) {
+  const calls = [], saved = [], elements = {};
+  for (const id of ['key', 'status', 'lightweight', 'connect', 'check', 'open', 'diagnose', 'report']) {
     elements[id] = {value: '', textContent: '', hidden: true, focus() {}, select() { this.selected = true; }};
   }
   const context = vm.createContext({document: {getElementById: id => elements[id]},
-    chrome: {storage: {local: {get: async () => ({})}, onChanged: {addListener() {}}},
+    chrome: {storage: {local: {get: async () => ({}), set: async value => {saved.push(JSON.parse(JSON.stringify(value)));}}, onChanged: {addListener() {}}},
       runtime: {sendMessage: async message => { calls.push(message); return reply; }}}});
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8'), context);
-  return {elements, calls};
+  return {elements, calls, saved};
 }
 test('diagnostic button requests a fresh report from the background and selects its text', async () => {
-  const e = popup({report_version: 1, market: 'wb', matched: {price: 26100, price_kind: 'wb_wallet'}, extension_version: '0.4.5'});
+  const e = popup({report_version: 1, market: 'wb', matched: {price: 26100, price_kind: 'wb_wallet'}, extension_version: '0.4.7'});
   await e.elements.diagnose.onclick();
   assert.equal(e.calls[0].type, 'paintwatch.diagnoseActive');
   assert.equal(JSON.parse(e.elements.report.value).matched.price, 26100);
@@ -32,4 +32,13 @@ test('an undefined connection response is handled without a TypeError', async ()
   const e = popup(undefined);
   await e.elements.connect.onclick();
   assert.match(e.elements.status.textContent, /Расширение не ответило/);
+});
+test('the media-saving checkbox defaults on and saves an explicit opt-out', async () => {
+  const e = popup({ok: true});
+  await Promise.resolve();
+  assert.equal(e.elements.lightweight.checked, true);
+  e.elements.lightweight.checked = false;
+  await e.elements.lightweight.onchange();
+  assert.deepEqual(e.saved, [{lightweight: false}]);
+  assert.match(e.elements.status.textContent, /новым проверкам/);
 });

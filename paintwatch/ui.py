@@ -28,6 +28,26 @@ def when(value):
     return display_time(value)
 
 
+def sync_rows(tree, rows, cache):
+    """Keep existing Tk rows and update only values changed since the last refresh."""
+    current = tuple(tree.get_children())
+    wanted = tuple(iid for iid, _ in rows)
+    wanted_set = set(wanted)
+    removed = [iid for iid in current if iid not in wanted_set]
+    if removed:
+        tree.delete(*removed)
+    existing = set(current) - set(removed)
+    for index, (iid, values) in enumerate(rows):
+        if iid not in existing:
+            tree.insert("", index, iid=iid, values=values)
+        elif cache.get(iid) != values:
+            tree.item(iid, values=values)
+        if current != wanted:
+            tree.move(iid, "", index)
+    cache.clear()
+    cache.update(rows)
+
+
 class Window:
     def __init__(self, store, vault, smoke=False):
         self.store, self.vault = store, vault
@@ -38,6 +58,7 @@ class Window:
         self.root.configure(background="#f1f5f9")
         self.actions = Queue()
         self.pending = []
+        self.row_cache = {}
         self.tray = None
         self.closing = False
         self.smoke = smoke
@@ -411,7 +432,7 @@ class Window:
         selected_event = self.queue_tree.selection()
         query = self.search.get().casefold()
         market = MARKETS[self.market.get()]
-        self.tree.delete(*self.tree.get_children())
+        rows = []
         for p in self.store.products():
             if market and p["market"] != market:
                 continue
@@ -420,42 +441,49 @@ class Window:
                 and query not in f"{p['name']} {p['article']} {p['tag']}".casefold()
             ):
                 continue
-            self.tree.insert(
-                "",
-                "end",
-                iid=str(p["id"]),
-                values=(
-                    p["id"],
-                    "Ozon" if p["market"] == "ozon" else "WB",
-                    p["name"],
-                    rub(p["price"]),
-                    rub(p["threshold"]),
-                    p["tag"],
-                    p["status"] if p["enabled"] else "Пауза",
-                    when(p["last_success"]),
+            rows.append(
+                (
+                    str(p["id"]),
+                    (
+                        p["id"],
+                        "Ozon" if p["market"] == "ozon" else "WB",
+                        p["name"],
+                        rub(p["price"]),
+                        rub(p["threshold"]),
+                        p["tag"],
+                        p["status"] if p["enabled"] else "Пауза",
+                        when(p["last_success"]),
+                    ),
                 ),
             )
+        sync_rows(self.tree, rows, self.row_cache.setdefault(self.tree, {}))
         if selection and self.tree.exists(selection[0]):
             self.tree.selection_set(selection[0])
-        self.tags_tree.delete(*self.tags_tree.get_children())
-        for tag in self.store.tags():
-            self.tags_tree.insert(
-                "", "end", iid=tag["name"], values=(tag["name"], rub(tag["threshold"]))
-            )
-        self.queue_tree.delete(*self.queue_tree.get_children())
-        for e in self.store.queue()[:500]:
-            self.queue_tree.insert(
-                "",
-                "end",
-                iid=str(e["id"]),
-                values=(
-                    e["id"],
-                    e["name"],
-                    rub(e["price"]),
-                    STATES[e["state"]],
-                    e["error"],
+        sync_rows(
+            self.tags_tree,
+            [
+                (tag["name"], (tag["name"], rub(tag["threshold"])))
+                for tag in self.store.tags()
+            ],
+            self.row_cache.setdefault(self.tags_tree, {}),
+        )
+        queue_rows = []
+        for e in self.store.queue(limit=500):
+            queue_rows.append(
+                (
+                    str(e["id"]),
+                    (
+                        e["id"],
+                        e["name"],
+                        rub(e["price"]),
+                        STATES[e["state"]],
+                        e["error"],
+                    ),
                 ),
             )
+        sync_rows(
+            self.queue_tree, queue_rows, self.row_cache.setdefault(self.queue_tree, {})
+        )
         if selected_tag and self.tags_tree.exists(selected_tag[0]):
             self.tags_tree.selection_set(selected_tag[0])
         if selected_event and self.queue_tree.exists(selected_event[0]):
@@ -746,6 +774,7 @@ class Window:
             if action == "show":
                 self.root.deiconify()
                 self.root.lift()
+                self.refresh()
             elif action == "exit":
                 self.exit()
         for future in list(self.pending):
@@ -777,7 +806,8 @@ class Window:
 
     def periodic_refresh(self):
         if not self.closing:
-            self.refresh()
+            if self.root.state() not in ("withdrawn", "iconic"):
+                self.refresh()
             self.root.after(5000, self.periodic_refresh)
 
     def create_tray(self):

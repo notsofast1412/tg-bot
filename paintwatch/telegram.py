@@ -104,7 +104,7 @@ async def deliver(store, vault):
     except (ValueError, RuntimeError):
         return
     try:
-        for event in reversed(store.queue()):
+        for event in reversed(store.queue(states=("pending", "blocked"))):
             if (
                 event["state"] not in ("pending", "blocked")
                 or event["next_try"] > time.time()

@@ -66,6 +66,7 @@ class Store:
                 CREATE INDEX IF NOT EXISTS history_product ON history(product_id,observed_at);
                 CREATE INDEX IF NOT EXISTS products_due ON products(enabled,next_check);
                 CREATE INDEX IF NOT EXISTS checks_latest ON checks(product_id,id);
+                CREATE INDEX IF NOT EXISTS outbox_state ON outbox(state,id);
                 CREATE TABLE IF NOT EXISTS check_jobs(
                     product_id INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
                     lease TEXT NOT NULL UNIQUE,expires INTEGER NOT NULL,
@@ -129,10 +130,24 @@ class Store:
             ).fetchone()
             return row[0] if row else default
 
+    def settings(self, defaults):
+        values = {key: str(value) for key, value in defaults.items()}
+        if not values:
+            return values
+        placeholders = ",".join("?" for _ in values)
+        with self.db() as db:
+            values.update(
+                db.execute(
+                    f"SELECT key,value FROM settings WHERE key IN ({placeholders})",
+                    tuple(values),
+                ).fetchall()
+            )
+        return values
+
     def configure(self, values):
         with self.db() as db:
             db.executemany(
-                "INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                "INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE settings.value<>excluded.value",
                 [(k, str(v)) for k, v in values.items()],
             )
 
@@ -505,14 +520,20 @@ class Store:
                 )
             ]
 
-    def queue(self):
+    def queue(self, *, states=None, limit=None):
+        query = "SELECT o.*,p.name,p.url,p.tag,p.market,p.price current_price,p.status current_status,p.failures current_failures,p.last_success,p.last_attempt,p.enabled,p.below,p.generation current_generation,COALESCE(p.custom_threshold,t.threshold) current_threshold FROM outbox o JOIN products p ON p.id=o.product_id JOIN tags t ON t.name=p.tag"
+        params = []
+        if states is not None:
+            if not states:
+                return []
+            query += " WHERE o.state IN (" + ",".join("?" for _ in states) + ")"
+            params.extend(states)
+        query += " ORDER BY o.id DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(max(0, int(limit)))
         with self.db() as db:
-            return [
-                dict(r)
-                for r in db.execute(
-                    "SELECT o.*,p.name,p.url,p.tag,p.market,p.price current_price,p.status current_status,p.failures current_failures,p.last_success,p.last_attempt,p.enabled,p.below,p.generation current_generation,COALESCE(p.custom_threshold,t.threshold) current_threshold FROM outbox o JOIN products p ON p.id=o.product_id JOIN tags t ON t.name=p.tag ORDER BY o.id DESC"
-                )
-            ]
+            return [dict(r) for r in db.execute(query, params)]
 
     def delivery(self, oid, state, error="", delay=0):
         now = int(time.time())

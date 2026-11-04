@@ -4,9 +4,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const {webcrypto: crypto} = require('node:crypto');
+const {FakeClock, flush} = require('./fake_clock.cjs');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-function environment({monitoring = true, existing, count = 1, parallelism = 1, hold = false, stale = false, timeout = 1000} = {}) {
-  const calls = [], created = [], changed = [], closed = [], pending = [], documents = new Map(), tabs = new Map();
+function environment({monitoring = true, existing, count = 1, parallelism = 1, hold = false, stale = false, timeout = 1000, clock} = {}) {
+  const calls = [], created = [], changed = [], closed = [], pending = [], ruleUpdates = [], rules = new Map(), documents = new Map(), tabs = new Map();
   const local = {key: 'fixture', enabled: true}, session = {};
   let reads = 0, nextTabId = 2, onMessage;
   if (existing) {
@@ -18,7 +19,8 @@ function environment({monitoring = true, existing, count = 1, parallelism = 1, h
   const storage = object => ({get: async () => ({...object}), set: async value => Object.assign(object, value), remove: async key => { delete object[key]; }});
   const listener = {addListener() {}};
   const context = vm.createContext({URL, AbortController, crypto, console,
-    setTimeout: (fn, delay) => setTimeout(fn, delay === 100 ? 0 : delay), clearTimeout,
+    ...(clock ? {Date: clock.Date} : {}),
+    setTimeout: clock ? clock.setTimeout : (fn, delay) => setTimeout(fn, delay === 100 ? 0 : delay), clearTimeout: clock ? clock.clearTimeout : clearTimeout,
     fetch: async (url, options) => {
       assert.equal(new URL(url).origin, 'http://127.0.0.1:18765');
       calls.push({url, body: options.body ? JSON.parse(options.body) : null});
@@ -28,7 +30,15 @@ function environment({monitoring = true, existing, count = 1, parallelism = 1, h
     chrome: {
       storage: {local: storage(local), session: storage(session)},
       alarms: {onAlarm: listener, create() {}},
-      runtime: {getManifest: () => ({version: '0.4.5'}), onInstalled: listener, onStartup: listener, onMessage: {addListener: fn => { onMessage = fn; }}},
+      runtime: {getManifest: () => ({version: '0.4.7'}), onInstalled: listener, onStartup: listener, onMessage: {addListener: fn => { onMessage = fn; }}},
+      declarativeNetRequest: {
+        getSessionRules: async () => [...rules.values()],
+        updateSessionRules: async options => {
+          ruleUpdates.push(JSON.parse(JSON.stringify(options)));
+          for (const id of options.removeRuleIds || []) rules.delete(id);
+          for (const rule of options.addRules || []) rules.set(rule.id, JSON.parse(JSON.stringify(rule)));
+        }
+      },
       tabs: {
         // status intentionally stays loading: images must not hold up price collection.
         get: async id => ({...tabs.get(id), status: 'loading'}),
@@ -57,7 +67,7 @@ function environment({monitoring = true, existing, count = 1, parallelism = 1, h
   // Exercise the scheduler explicitly; never leave real polling timers behind in tests.
   vm.runInContext('schedule = () => {}', context);
   const settle = async () => { await vm.runInContext('Promise.all([...active.values()])', context); };
-  return {context, calls, created, changed, closed, local, session, pending, settle, tabs, message: message => new Promise(reply => onMessage(message, {}, reply))};
+  return {context, calls, created, changed, closed, local, session, pending, ruleUpdates, rules, settle, tabs, message: message => new Promise(reply => onMessage(message, {}, reply))};
 }
 test('background sends a leased result before images finish loading', async () => {
   const e = environment();
@@ -171,7 +181,7 @@ test('diagnostics injects the current extractor and works without desktop or a c
   e.context.fetch = async () => { throw new TypeError('Failed to fetch'); };
   const data = await e.message({type: 'paintwatch.diagnoseActive'});
   assert.equal(data.matched.price, 26100);
-  assert.equal(data.extension_version, '0.4.5');
+  assert.equal(data.extension_version, '0.4.7');
   assert.equal(injections.length, 2);
   assert.equal(injections[0].files[0], 'extractor.js');
   assert.equal(injections[0].target.tabId, 81);
@@ -258,4 +268,77 @@ test('a desktop lacking availability support asks for the application update bef
   e.context.fetch = async () => ({ok: true, json: async () => ({protocol: 2, wb_price_kind: 'wb_wallet', monitoring: true, parallelism: 4})});
   const response = await e.message({type: 'paintwatch.connect', key: 'fixture'});
   assert.equal(response.ok, false); assert.match(response.error, /0\.4\.5/); assert.equal(e.created.length, 0);
+});
+test('lightweight mode blocks only images and media in owned marketplace tabs and clears its rules', async () => {
+  const e = environment();
+  await e.context.tick(); await e.settle();
+  const rule = e.ruleUpdates.find(update => update.addRules)?.addRules[0];
+  assert.deepEqual(rule.condition.resourceTypes, ['image', 'media']);
+  assert.deepEqual(rule.condition.initiatorDomains, ['ozon.ru', 'wildberries.ru']);
+  assert.equal(rule.condition.tabIds.length, 1);
+  assert.deepEqual(rule.condition.tabIds, e.closed);
+  assert.equal(rule.action.type, 'block');
+  assert.equal(e.rules.size, 0);
+  assert.equal(Object.keys(e.session).filter(key => key.startsWith('check_tab_')).length, 0);
+});
+test('lightweight mode can be disabled and ordinary manual tabs receive no rules', async () => {
+  const e = environment();
+  e.local.lightweight = false;
+  await e.context.tick(); await e.settle();
+  assert.equal(e.ruleUpdates.length, 0);
+  await e.message({type: 'paintwatch.open'}); await flush();
+  assert.equal(e.created.at(-1).active, true);
+  assert.equal(e.rules.size, 0);
+});
+test('orphaned media rules are removed even if session tab ownership was lost', async () => {
+  const e = environment({count: 0});
+  e.rules.set(101, {id: 101});
+  e.rules.set(102, {id: 102});
+  await e.context.tick(); await e.settle();
+  assert.equal(e.rules.size, 0);
+});
+test('a reused user tab loses its media rule and remains open', async () => {
+  const e = environment({hold: true});
+  await e.context.tick(); await flush();
+  assert.equal(e.pending.length, 1); assert.equal(e.rules.size, 1);
+  const [id] = e.tabs.keys();
+  e.tabs.set(id, {id, url: 'https://example.com/'});
+  e.pending.shift()(); await e.settle();
+  assert.equal(e.rules.size, 0); assert.ok(e.tabs.has(id)); assert.equal(e.closed.length, 0);
+});
+test('late rule installation after timeout cannot overwrite the next slot owner or its rule', async () => {
+  const clock = new FakeClock();
+  const e = environment({count: 2, hold: true, timeout: 100, clock});
+  const update = e.context.chrome.declarativeNetRequest.updateSessionRules;
+  let release, first = true;
+  e.context.chrome.declarativeNetRequest.updateSessionRules = async options => {
+    if (options.addRules && first) {
+      first = false;
+      await new Promise(resolve => { release = resolve; });
+    }
+    return update(options);
+  };
+  await e.context.tick(); await flush();
+  assert.equal(typeof release, 'function');
+  await clock.advance(100); await e.settle();
+  assert.equal(e.closed.length, 1);
+  await e.context.tick(); await flush();
+  assert.equal(e.pending.length, 1);
+  const [activeId] = e.tabs.keys();
+  const activeRule = [...e.rules.values()][0].id;
+  release(); await flush();
+  assert.equal(e.rules.size, 1); assert.ok(e.rules.has(activeRule));
+  assert.equal(e.session[`check_tab_${activeId}`].id, activeId);
+  assert.ok(e.tabs.has(activeId));
+  e.pending.shift()(); await e.settle();
+  assert.equal(e.rules.size, 0); assert.equal(e.tabs.size, 0);
+});
+test('no next-job requests are sent when the desktop reports no eligible work', async () => {
+  const e = environment();
+  e.context.fetch = async url => {
+    assert.ok(url.endsWith('/status'));
+    return {ok: true, json: async () => ({protocol: 2, wb_price_kind: 'wb_wallet', availability_status: true, monitoring: true, parallelism: 6, ready: 0})};
+  };
+  await e.context.tick(); await e.settle();
+  assert.equal(e.created.length, 0);
 });
