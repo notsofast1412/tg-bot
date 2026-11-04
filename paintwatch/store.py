@@ -204,7 +204,7 @@ class Store:
     def check_timeout(self):
         return max(1, min(120, int(self.setting("check_timeout", "20"))))
 
-    def add(self, refs, name, tag, threshold=None):
+    def add(self, refs, name, tag, threshold=None, *, clear_setting=None):
         added = 0
         with self.db() as db:
             for ref in refs:
@@ -222,6 +222,8 @@ class Store:
                     ),
                 )
                 added += cursor.rowcount
+            if clear_setting is not None:
+                db.execute("UPDATE settings SET value='' WHERE key=?", (clear_setting,))
         return added
 
     def _rebase(self, db, pid):

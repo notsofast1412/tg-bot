@@ -2,9 +2,11 @@
 
 import asyncio
 import hashlib
+import re
 import time
 
-from .domain import money, parse_batch, rub
+from .add_dialog import AddDialog, CANCEL
+from .domain import money, rub
 from .telegram import Telegram, TelegramError
 
 
@@ -29,7 +31,7 @@ KEYBOARD = {
     "is_persistent": True,
     "input_field_placeholder": "Выберите действие или введите команду",
 }
-MENU_VERSION = "0.4.1"
+MENU_VERSION = "0.4.6"
 COMMANDS = [
     {"command": command, "description": description}
     for command, description in (
@@ -40,7 +42,8 @@ COMMANDS = [
         ("stop", "Остановить мониторинг и разовый обход"),
         ("products", "Список товаров"),
         ("tags", "Список тегов и порогов"),
-        ("add", "Добавить товары: тег и ссылки"),
+        ("add", "Добавить товары: ссылки или артикулы"),
+        ("cancel", "Отменить добавление товара"),
         ("tag", "Создать тег с порогом"),
         ("delete", "Удалить товар по ID с подтверждением"),
         ("threshold", "Изменить порог товара"),
@@ -63,6 +66,9 @@ HELP = """PaintWatch — управление
 /run /stop — включить / остановить мониторинг
 /products [страница] — список товаров (ID из первого столбца)
 /add #тег ссылка [ссылка…] — добавить товары
+/add #тег артикул — бот спросит площадку
+Можно прислать только артикул: бот спросит площадку и тег.
+/cancel — отменить добавление
 /delete ID confirm — удалить товар и его историю
 /pause ID /resume ID — выключить / включить товар
 /check [ID|all] — запросить проверки по текущему интервалу
@@ -119,14 +125,33 @@ class TelegramControl:
                 issues.append(f"Уведомление №{event['id']}: {event['error'][:200]}")
         return issues
 
-    def execute(self, text):
+    def add_dialog(self, fingerprint=""):
+        return AddDialog(self.store, self.owner(), fingerprint)
+
+    def execute(self, text, fingerprint=""):
         text = BUTTONS.get(text.strip(), text)
+        text = text.strip()
+        dialog = self.add_dialog(fingerprint)
+        if text.casefold() in ("/cancel", CANCEL.casefold()):
+            dialog.cancel()
+            return "Добавление отменено"
+        if re.fullmatch(r"[0-9]+(?:\s+[0-9]+)*", text):
+            return dialog.begin(text)
         parts = text.split()
         if not parts:
             return HELP
         command = parts[0].split("@", 1)[0].lower()
         args = parts[1:]
+        if command == "/cancel":
+            dialog.cancel()
+            return "Добавление отменено"
+        if not command.startswith("/"):
+            answer = dialog.answer(text)
+            if answer is not None:
+                return answer
         if command in ("/start", "/help"):
+            if command == "/start":
+                dialog.cancel()
             return HELP
         if command == "/status":
             products = self.store.products()
@@ -166,7 +191,8 @@ class TelegramControl:
                 + "\n\n/tag #название 400 — создать тег"
             )
         if command == "/add" and not args:
-            return "Добавление товаров:\n/add #тег ссылка [ссылка…]\n\nПример:\n/add #arton https://www.wildberries.ru/catalog/708052242/detail.aspx\n\n/tags — доступные теги"
+            dialog.cancel()
+            return "Пришлите артикул — я спрошу площадку и тег.\n\nИли укажите тег заранее:\n/add #belazo 1797187018\n\nС полной ссылкой площадка определяется автоматически:\n/add #arton https://www.wildberries.ru/catalog/708052242/detail.aspx\n\n/tags — доступные теги\n/cancel — отменить добавление"
         if command == "/tag" and not args:
             return "Создание тега:\n/tag #название порог_в_рублях\n\nПример: /tag #montana 400"
         if command == "/delete" and not args:
@@ -206,16 +232,12 @@ class TelegramControl:
                 raise ValueError("Допустимо 1–32 проверки")
             self.store.configure({"parallelism": count})
             return f"Параллельно: {count}. Уже начатые проверки завершатся"
-        if command == "/add" and len(args) >= 2:
-            tag = args[0]
-            if tag not in {t["name"] for t in self.store.tags()}:
-                raise ValueError(
-                    "Неизвестный тег. Доступны: "
-                    + " ".join(t["name"] for t in self.store.tags())
-                )
-            refs = parse_batch("\n".join(args[1:]))
-            count = self.store.add(refs, "", tag)
-            return f"Добавлено {count} из {len(refs)} карточек. Дубликаты пропущены"
+        if command == "/add" and args:
+            tag = args[0].casefold() if args[0].startswith("#") else None
+            items = args[1:] if tag else args
+            if not items:
+                raise ValueError("После тега укажите артикул или полную ссылку")
+            return dialog.begin("\n".join(items), tag)
         if command == "/check" and (not args or args == ["all"]):
             self.store.request_check()
             return "Запрошены проверки всех товаров по текущему интервалу. Паузы площадок сохраняются"
@@ -309,10 +331,14 @@ class TelegramControl:
             if uid != self.owner():
                 continue
             try:
-                answer = self.execute(text)
+                answer = self.execute(text, fingerprint)
             except (ValueError, OverflowError) as error:
                 answer = "Ошибка: " + str(error)[:500]
-            await api.send(uid, answer, reply_markup=KEYBOARD)
+            await api.send(
+                uid,
+                answer,
+                reply_markup=self.add_dialog(fingerprint).markup() or KEYBOARD,
+            )
 
     async def refresh_menu(self, api, fingerprint):
         owner = self.owner()
@@ -334,10 +360,12 @@ class TelegramControl:
         )
         # Claim before sending: a lost reply must not duplicate the panel on each restart.
         self.store.configure({key: signature})
+        dialog = self.add_dialog(fingerprint)
         await api.send(
             owner,
-            "Панель PaintWatch обновлена. «Проверить все» запускает разовый обход. Новые ценовые уведомления приходят при дальнейшем снижении минимум на 15 ₽. /help — все команды",
-            reply_markup=KEYBOARD,
+            dialog.prompt()
+            or "Панель PaintWatch обновлена. Пришлите артикул — я спрошу площадку и тег. «Проверить все» запускает разовый обход. /help — все команды",
+            reply_markup=dialog.markup() or KEYBOARD,
         )
 
     async def alert(self, api):
