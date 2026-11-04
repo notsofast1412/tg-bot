@@ -51,6 +51,8 @@ Windows 11 x64, 2–4 vCPU, 8 GB RAM, SSD 64–80 GB, VirtIO-сеть через
 
 ## Локальная сборка
 
+Обязательные проверки GitHub Actions выполняются на `windows-2022`: Python, JavaScript расширения, Ruff, окно приложения и DPAPI. Успешные проверки разрешают упаковку и запуск готового EXE. Отдельного обязательного задания Ubuntu нет. При ошибке тестов скачайте артефакт **PaintWatch-test-logs** с полным выводом Python/JavaScript; это журнал, а не сборка программы.
+
 С Python 3.12 x64 в PowerShell:
 
 ```powershell

@@ -102,4 +102,4 @@ python3.12 -m venv .venv
 node --test extension/tests/extractor.test.cjs extension/tests/background.test.cjs extension/tests/content.test.cjs extension/tests/popup.test.cjs
 ```
 
-В Windows замените `.venv/bin/` на `.venv\Scripts\`. `build.ps1` собирает Windows x64 на Windows; EXE из Linux не кросс-компилируется. GitHub Actions проверяет ядро на Linux/Windows, окно и DPAPI на Windows, затем упакованный EXE. Работайте в существующем checkout; отдельный worktree не требуется.
+В Windows замените `.venv/bin/` на `.venv\Scripts\`. `build.ps1` собирает Windows x64 на Windows; EXE из Linux не кросс-компилируется. GitHub Actions запускает Python, JavaScript, Ruff, окно и DPAPI на Windows, затем отдельно проверяет упакованный EXE. При ошибке Python/JavaScript доступен артефакт **PaintWatch-test-logs** с полным выводом; JavaScript также выводится в формате spec с названием упавшего теста. Работайте в существующем checkout; отдельный worktree не требуется.
