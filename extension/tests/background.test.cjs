@@ -6,9 +6,9 @@ const vm = require('node:vm');
 const {webcrypto: crypto} = require('node:crypto');
 const {FakeClock, flush} = require('./fake_clock.cjs');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-function environment({monitoring = true, existing, count = 1, parallelism = 1, hold = false, stale = false, timeout = 1000, clock} = {}) {
+function environment({monitoring = true, existing, count = 1, parallelism = 1, hold = false, stale = false, timeout = 1000, clock, local: initialLocal = {}} = {}) {
   const calls = [], created = [], changed = [], closed = [], pending = [], ruleUpdates = [], rules = new Map(), documents = new Map(), tabs = new Map();
-  const local = {key: 'fixture', enabled: true}, session = {};
+  const local = {key: 'fixture', enabled: true, ...initialLocal}, session = {};
   let reads = 0, nextTabId = 2, onMessage;
   if (existing) {
     session.tab_ozon_0 = {id: 1, url: 'https://www.ozon.ru/product/1/'};
@@ -16,7 +16,7 @@ function environment({monitoring = true, existing, count = 1, parallelism = 1, h
     documents.set(1, 'legacy-document');
   }
   const jobs = Array.from({length: count}, (_, i) => ({id: i + 1, market: 'ozon', article: String(i + 1), variant: '', url: `https://www.ozon.ru/product/${i + 1}/`, lease: `lease${i}`, timeout_ms: timeout}));
-  const storage = object => ({get: async () => ({...object}), set: async value => Object.assign(object, value), remove: async key => { delete object[key]; }});
+  const storage = object => ({get: async () => ({...object}), set: async value => Object.assign(object, value), remove: async keys => { for (const key of [].concat(keys)) delete object[key]; }});
   const listener = {addListener() {}};
   const context = vm.createContext({URL, AbortController, crypto, console,
     ...(clock ? {Date: clock.Date} : {}),
@@ -30,7 +30,7 @@ function environment({monitoring = true, existing, count = 1, parallelism = 1, h
     chrome: {
       storage: {local: storage(local), session: storage(session)},
       alarms: {onAlarm: listener, create() {}},
-      runtime: {getManifest: () => ({version: '0.4.7'}), onInstalled: listener, onStartup: listener, onMessage: {addListener: fn => { onMessage = fn; }}},
+      runtime: {getManifest: () => ({version: '0.4.8'}), getURL: name => `chrome-extension://paintwatch/${name}`, onInstalled: listener, onStartup: listener, onMessage: {addListener: fn => { onMessage = fn; }}},
       declarativeNetRequest: {
         getSessionRules: async () => [...rules.values()],
         updateSessionRules: async options => {
@@ -41,7 +41,11 @@ function environment({monitoring = true, existing, count = 1, parallelism = 1, h
       },
       tabs: {
         // status intentionally stays loading: images must not hold up price collection.
-        get: async id => ({...tabs.get(id), status: 'loading'}),
+        get: async id => {
+          if (!tabs.has(id)) throw new Error('No tab');
+          return {...tabs.get(id), status: 'loading'};
+        },
+        query: async () => [...tabs.values()],
         create: async options => {
           const id = nextTabId++, tab = {id, url: options.url};
           tabs.set(id, tab); documents.set(id, `doc${id}`); created.push(options); return tab;
@@ -181,7 +185,7 @@ test('diagnostics injects the current extractor and works without desktop or a c
   e.context.fetch = async () => { throw new TypeError('Failed to fetch'); };
   const data = await e.message({type: 'paintwatch.diagnoseActive'});
   assert.equal(data.matched.price, 26100);
-  assert.equal(data.extension_version, '0.4.7');
+  assert.equal(data.extension_version, '0.4.8');
   assert.equal(injections.length, 2);
   assert.equal(injections[0].files[0], 'extractor.js');
   assert.equal(injections[0].target.tabId, 81);
@@ -341,4 +345,203 @@ test('no next-job requests are sent when the desktop reports no eligible work', 
   };
   await e.context.tick(); await e.settle();
   assert.equal(e.created.length, 0);
+});
+
+const CLEANUP_INTERVAL = 30 * 60 * 1000;
+const keeperUrl = 'chrome-extension://paintwatch/idle.html';
+function extraTabs(e) {
+  e.tabs.set(100, {id: 100, windowId: 1, url: 'https://example.com/', pinned: true});
+  e.tabs.set(101, {id: 101, windowId: 2}); // No permission to read this tab's URL is needed.
+}
+test('after thirty minutes all profile tabs close except one idle tab and the timer repeats', async () => {
+  const clock = new FakeClock(), e = environment({clock, count: 0, monitoring: false});
+  extraTabs(e);
+  await e.context.tick();
+  const deadline = e.local.cleanupNextAt;
+  assert.equal(deadline, clock.now + CLEANUP_INTERVAL);
+  await clock.advance(CLEANUP_INTERVAL - 1); await e.context.tick();
+  assert.equal(e.closed.length, 0);
+  await clock.advance(1); await e.context.tick();
+  assert.equal(e.tabs.size, 1);
+  const [keeper] = e.tabs.values();
+  assert.equal(keeper.url, keeperUrl);
+  assert.ok(e.closed.includes(100)); assert.ok(e.closed.includes(101));
+  assert.ok(!e.closed.includes(keeper.id));
+  assert.equal(e.local.cleanupNextAt, clock.now + CLEANUP_INTERVAL);
+  e.tabs.set(102, {id: 102, url: 'https://www.ozon.ru/search/'});
+  await clock.advance(CLEANUP_INTERVAL); await e.context.tick();
+  assert.equal(e.tabs.size, 1); assert.ok(e.tabs.has(keeper.id));
+  assert.equal(e.created.length, 1); assert.ok(e.closed.includes(102));
+  assert.ok(!e.calls.some(call => call.url.endsWith('/next')));
+});
+test('cleanup drains existing checks without claiming more jobs and resumes after the sweep', async () => {
+  const clock = new FakeClock(), e = environment({clock, count: 3, parallelism: 2, hold: true});
+  await e.context.tick(); await flush();
+  assert.equal(e.pending.length, 2);
+  extraTabs(e);
+  e.local.cleanupNextAt = clock.now;
+  for (let n = 0; n < 3; n++) await e.context.tick();
+  assert.equal(e.calls.filter(call => call.url.endsWith('/next')).length, 2);
+  assert.equal(e.closed.length, 0); assert.equal(e.tabs.size, 4);
+  assert.match(e.local.status, /проверки приостановлены/);
+  const resultCountsAtRemoval = [], remove = e.context.chrome.tabs.remove;
+  e.context.chrome.tabs.remove = async id => {
+    if (id === 100 || id === 101) resultCountsAtRemoval.push(e.calls.filter(call => call.url.endsWith('/result')).length);
+    await remove(id);
+  };
+  for (const release of e.pending.splice(0)) release();
+  await e.settle(); await e.context.tick();
+  assert.deepEqual(resultCountsAtRemoval, [2, 2]);
+  assert.equal(e.tabs.size, 1);
+  assert.equal(e.calls.filter(call => call.url.endsWith('/next')).length, 2);
+  assert.ok(e.calls.filter(call => call.url.endsWith('/result')).every(call => !call.body.error));
+  await e.context.tick(); await flush();
+  assert.ok(e.calls.filter(call => call.url.endsWith('/next')).length > 2);
+  assert.equal(e.pending.length, 1);
+  e.pending.shift()(); await e.settle();
+  assert.equal(e.tabs.size, 1);
+});
+test('restart preserves the cleanup deadline and waits for persisted desktop leases', async () => {
+  const clock = new FakeClock(), before = environment({clock, monitoring: false});
+  await before.context.tick();
+  const e = environment({clock, count: 0, local: {...before.local}});
+  extraTabs(e);
+  await e.context.tick(); await e.settle();
+  assert.equal(e.local.cleanupNextAt, before.local.cleanupNextAt);
+  const claims = e.calls.filter(call => call.url.endsWith('/next')).length;
+  await clock.advance(CLEANUP_INTERVAL);
+  const fetch = e.context.fetch;
+  let leased = 2;
+  e.context.fetch = async (...args) => {
+    const response = await fetch(...args);
+    if (!args[0].endsWith('/status')) return response;
+    const data = await response.json();
+    return {ok: true, json: async () => ({...data, active: leased})};
+  };
+  await e.context.tick();
+  assert.equal(e.closed.length, 0);
+  assert.equal(e.calls.filter(call => call.url.endsWith('/next')).length, claims);
+  leased = 0;
+  await e.context.tick();
+  assert.equal(e.tabs.size, 1);
+  assert.equal([...e.tabs.values()][0].url, keeperUrl);
+});
+test('disabled automatic cleanup does not sweep tabs and enabling it starts a fresh interval', async () => {
+  const clock = new FakeClock(), e = environment({clock, count: 0, monitoring: false, local: {autoCleanup: false, cleanupNextAt: clock.now - 1}});
+  extraTabs(e);
+  await e.context.tick();
+  assert.equal(e.tabs.size, 2); assert.equal(e.local.cleanupNextAt, undefined);
+  e.local.autoCleanup = true;
+  await e.context.tick();
+  assert.equal(e.local.cleanupNextAt, clock.now + CLEANUP_INTERVAL);
+  assert.equal(e.closed.length, 0);
+});
+test('manual cleanup works with auto cleanup disabled and never turns on stopped monitoring', async () => {
+  const e = environment({count: 0, monitoring: false, local: {autoCleanup: false}});
+  extraTabs(e);
+  const result = await e.message({type: 'paintwatch.cleanup'});
+  assert.equal(result.ok, true);
+  await flush();
+  assert.equal(e.tabs.size, 1); assert.equal(e.local.autoCleanup, false);
+  assert.equal(e.local.cleanupRequested, false);
+  await e.context.tick();
+  assert.ok(e.calls.every(call => call.url.endsWith('/status')));
+  assert.equal(e.local.cleanupNextAt, undefined);
+});
+test('unpaired extension rejects a manual sweep without touching tabs', async () => {
+  const e = environment({local: {enabled: false}});
+  extraTabs(e);
+  const result = await e.message({type: 'paintwatch.cleanup'});
+  assert.match(result.error, /подключите/);
+  assert.equal(e.tabs.size, 2); assert.equal(e.closed.length, 0);
+});
+test('keeper creation failure preserves all old tabs and prevents new checks until retry succeeds', async () => {
+  const e = environment({local: {cleanupRequested: true}});
+  extraTabs(e);
+  const create = e.context.chrome.tabs.create;
+  e.context.chrome.tabs.create = async () => { throw new Error('Chrome unavailable'); };
+  await e.context.tick();
+  assert.equal(e.tabs.size, 2); assert.equal(e.closed.length, 0);
+  assert.equal(e.local.cleanupRequested, true);
+  assert.match(e.local.status, /проверки остаются на паузе/);
+  assert.ok(!e.calls.some(call => call.url.endsWith('/next')));
+  e.context.chrome.tabs.create = create;
+  await e.context.tick();
+  assert.equal(e.tabs.size, 1); assert.equal(e.local.cleanupRequested, false);
+});
+test('partial close failure retries without ever requesting removal of the last tab', async () => {
+  const e = environment({local: {cleanupRequested: true}, count: 0});
+  extraTabs(e);
+  const remove = e.context.chrome.tabs.remove;
+  let denied = true;
+  const countsBeforeRemove = [];
+  e.context.chrome.tabs.remove = async id => {
+    countsBeforeRemove.push(e.tabs.size);
+    if (id === 101 && denied) throw new Error('Busy');
+    await remove(id);
+  };
+  await e.context.tick();
+  assert.equal(e.tabs.size, 2); assert.ok(e.tabs.has(101));
+  assert.equal(e.local.cleanupRequested, true);
+  assert.ok(!e.calls.some(call => call.url.endsWith('/next')));
+  denied = false;
+  await e.context.tick();
+  assert.equal(e.tabs.size, 1); assert.equal(e.created.length, 1);
+  assert.ok(countsBeforeRemove.every(count => count >= 2));
+  assert.equal(e.local.cleanupRequested, false);
+});
+test('desktop disconnect leaves cleanup pending and checks paused until connection recovers', async () => {
+  const e = environment({local: {cleanupRequested: true}, count: 0});
+  extraTabs(e);
+  const fetch = e.context.fetch;
+  e.context.fetch = async () => { throw new TypeError('Failed to fetch'); };
+  await e.context.tick();
+  assert.equal(e.tabs.size, 2); assert.equal(e.local.cleanupRequested, true);
+  assert.match(e.local.status, /проверки остаются на паузе/);
+  e.context.fetch = fetch;
+  await e.context.tick();
+  assert.equal(e.tabs.size, 1); assert.equal(e.local.cleanupRequested, false);
+});
+test('hung checks finish by their existing timeout before cleanup and are reported only once', async () => {
+  const clock = new FakeClock(), e = environment({clock, hold: true, timeout: 100});
+  await e.context.tick(); await flush();
+  e.local.cleanupNextAt = clock.now;
+  await e.context.tick();
+  assert.equal(e.closed.length, 0);
+  await clock.advance(100); await e.settle();
+  await e.context.tick();
+  assert.equal(e.tabs.size, 1);
+  assert.equal(e.calls.filter(call => call.url.endsWith('/result')).length, 1);
+  e.pending.shift()(); await flush();
+  assert.equal(e.calls.filter(call => call.url.endsWith('/result')).length, 1);
+});
+test('a delayed tab creation after the sweep is closed even with an unavailable URL', async () => {
+  const clock = new FakeClock(), e = environment({clock, timeout: 100});
+  const create = e.context.chrome.tabs.create;
+  let releaseCreate;
+  e.context.chrome.tabs.create = options => options.url === keeperUrl ? create(options) : new Promise(resolve => {
+    releaseCreate = async () => {
+      const tab = await create(options);
+      e.tabs.set(tab.id, {id: tab.id});
+      resolve(tab);
+    };
+  });
+  await e.context.tick(); await flush();
+  assert.equal(typeof releaseCreate, 'function');
+  await clock.advance(100); await e.settle();
+  e.local.cleanupRequested = true;
+  await e.context.tick();
+  assert.equal(e.tabs.size, 1);
+  await releaseCreate(); await flush();
+  assert.equal(e.tabs.size, 1);
+  assert.equal([...e.tabs.values()][0].url, keeperUrl);
+  assert.equal(e.calls.filter(call => call.url.endsWith('/result')).length, 1);
+});
+test('checker cleanup also recognizes the pending product URL before navigation completes', async () => {
+  const e = environment({hold: true});
+  await e.context.tick(); await flush();
+  const [id] = e.tabs.keys();
+  e.tabs.set(id, {id, url: '', pendingUrl: 'https://www.ozon.ru/product/1/'});
+  e.pending.shift()(); await e.settle();
+  assert.equal(e.tabs.size, 0); assert.deepEqual(e.closed, [id]);
 });

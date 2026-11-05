@@ -5,11 +5,11 @@ const path = require('node:path');
 const vm = require('node:vm');
 function popup(reply) {
   const calls = [], saved = [], elements = {};
-  for (const id of ['key', 'status', 'lightweight', 'connect', 'check', 'open', 'diagnose', 'report']) {
+  for (const id of ['key', 'status', 'lightweight', 'autoCleanup', 'cleanup', 'connect', 'check', 'open', 'diagnose', 'report']) {
     elements[id] = {value: '', textContent: '', hidden: true, focus() {}, select() { this.selected = true; }};
   }
   const context = vm.createContext({document: {getElementById: id => elements[id]},
-    chrome: {storage: {local: {get: async () => ({}), set: async value => {saved.push(JSON.parse(JSON.stringify(value)));}}, onChanged: {addListener() {}}},
+    chrome: {storage: {local: {get: async () => ({}), set: async value => {saved.push(JSON.parse(JSON.stringify(value)));}, remove: async key => {saved.push({removed: key});}}, onChanged: {addListener() {}}},
       runtime: {sendMessage: async message => { calls.push(message); return reply; }}}});
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'popup.js'), 'utf8'), context);
   return {elements, calls, saved};
@@ -41,4 +41,23 @@ test('the media-saving checkbox defaults on and saves an explicit opt-out', asyn
   await e.elements.lightweight.onchange();
   assert.deepEqual(e.saved, [{lightweight: false}]);
   assert.match(e.elements.status.textContent, /новым проверкам/);
+});
+test('automatic cleanup defaults on and disabling it resets its saved deadline', async () => {
+  const e = popup({ok: true});
+  await Promise.resolve();
+  assert.equal(e.elements.autoCleanup.checked, true);
+  e.elements.autoCleanup.checked = false;
+  await e.elements.autoCleanup.onchange();
+  assert.deepEqual(e.saved, [{autoCleanup: false}, {removed: 'cleanupNextAt'}]);
+  assert.match(e.elements.status.textContent, /выключена/);
+  assert.equal(e.calls[0].type, 'paintwatch.tick');
+});
+test('cleanup button requests a paused sweep and displays a rejected request', async () => {
+  const e = popup({ok: true});
+  await e.elements.cleanup.onclick();
+  assert.equal(e.calls[0].type, 'paintwatch.cleanup');
+  assert.match(e.elements.status.textContent, /проверки приостанавливаются/);
+  const rejected = popup({error: 'Сначала подключите расширение'});
+  await rejected.elements.cleanup.onclick();
+  assert.match(rejected.elements.status.textContent, /Сначала подключите/);
 });

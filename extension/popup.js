@@ -1,7 +1,16 @@
 const key = document.getElementById('key');
 const status = document.getElementById('status');
 const lightweight = document.getElementById('lightweight');
-chrome.storage.local.get(['key', 'status', 'lightweight']).then(saved => { key.value = saved.key || ''; status.textContent = saved.status || 'Вставьте код подключения'; lightweight.checked = saved.lightweight !== false; });
+const autoCleanup = document.getElementById('autoCleanup');
+chrome.storage.local.get(['key', 'status', 'lightweight', 'autoCleanup']).then(saved => { key.value = saved.key || ''; status.textContent = saved.status || 'Вставьте код подключения'; lightweight.checked = saved.lightweight !== false; autoCleanup.checked = saved.autoCleanup !== false; });
+autoCleanup.onchange = async () => {
+  try {
+    await chrome.storage.local.set({autoCleanup: autoCleanup.checked});
+    await chrome.storage.local.remove('cleanupNextAt');
+    status.textContent = autoCleanup.checked ? 'Автоочистка включена: следующий запуск через 30 минут' : 'Автоочистка выключена';
+    await chrome.runtime.sendMessage({type: 'paintwatch.tick'});
+  } catch { status.textContent = 'Не удалось сохранить настройку автоочистки'; }
+};
 lightweight.onchange = async () => {
   try {
     await chrome.storage.local.set({lightweight: lightweight.checked});
@@ -15,7 +24,16 @@ document.getElementById('connect').onclick = async () => {
   } catch { status.textContent = 'Не удалось подключиться'; }
 };
 document.getElementById('check').onclick = () => chrome.runtime.sendMessage({type: 'paintwatch.tick'});
-document.getElementById('open').onclick = () => chrome.runtime.sendMessage({type: 'paintwatch.open'});
+document.getElementById('open').onclick = async () => {
+  const result = await chrome.runtime.sendMessage({type: 'paintwatch.open'});
+  if (result?.error) status.textContent = result.error;
+};
+document.getElementById('cleanup').onclick = async () => {
+  try {
+    const result = await chrome.runtime.sendMessage({type: 'paintwatch.cleanup'});
+    status.textContent = result?.ok ? 'Очистка запрошена. Новые проверки приостанавливаются' : result?.error || 'Расширение не ответило';
+  } catch { status.textContent = 'Не удалось запустить очистку вкладок'; }
+};
 chrome.storage.onChanged.addListener(changes => { if (changes.status) status.textContent = changes.status.newValue; });
 
 document.getElementById('diagnose').onclick = async () => {

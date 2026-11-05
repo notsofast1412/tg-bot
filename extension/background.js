@@ -1,7 +1,9 @@
 importScripts('extractor.js');
 const BASE = 'http://127.0.0.1:18765';
+const CLEANUP_INTERVAL = 30 * 60 * 1000;
 const active = new Map();
 const liveTabs = new Map();
+let cleaning = false, cleanupEpoch = 0;
 let cleanedLegacy = false;
 let cleanedRules = false;
 let displayedStatus;
@@ -108,7 +110,7 @@ async function collectTab(tab, documentId, job, deadline) {
   }
   throw new Error('Время проверки истекло');
 }
-async function closeOwned(owned, key) {
+async function closeOwned(owned, key, force = false) {
   const rulesCleared = await clearMedia(owned);
   let tab;
   try { tab = await chrome.tabs.get(owned.id); }
@@ -116,11 +118,11 @@ async function closeOwned(owned, key) {
   let same = false;
   if (tab) {
     try {
-      const actual = PaintWatchExtract.ref(tab.url), expected = PaintWatchExtract.ref(owned.url);
+      const actual = PaintWatchExtract.ref(tab.pendingUrl || tab.url), expected = PaintWatchExtract.ref(owned.url);
       same = actual.market === expected.market && actual.article === expected.article && actual.variant === expected.variant;
     } catch { /* Repurposed by the user. */ }
   }
-  if (same) {
+  if (tab && (same || force)) {
     try { await chrome.tabs.remove(owned.id); }
     catch { return; } // Keep ownership so the next cleanup can retry.
   }
@@ -149,17 +151,69 @@ async function cleanupTabs() {
     } catch { /* Retry cleanup after a transient Chrome API failure. */ }
   }
 }
+async function cleanupBrowser(config) {
+  if (!config.cleanupRequested) {
+    if (config.autoCleanup === false) {
+      if (config.cleanupNextAt !== undefined) await chrome.storage.local.remove('cleanupNextAt');
+      return false;
+    }
+    if (!Number.isFinite(config.cleanupNextAt)) {
+      await chrome.storage.local.set({cleanupNextAt: Date.now() + CLEANUP_INTERVAL});
+      return false;
+    }
+    if (Date.now() < config.cleanupNextAt) return false;
+  }
+  cleaning = true;
+  try {
+    await showStatus('Очистка вкладок: новые проверки приостановлены, ждём завершения текущих');
+    const latest = await chrome.storage.local.get(['autoCleanup', 'cleanupRequested']);
+    if (latest.autoCleanup === false && !latest.cleanupRequested) return true;
+    // Persisted leases can outlive a restarted extension. Wait without taking new jobs.
+    const status = await api('/v1/status');
+    if (active.size || status.active > 0) return true;
+    cleanupEpoch++;
+    const keeperUrl = chrome.runtime.getURL('idle.html');
+    let tabs = await chrome.tabs.query({});
+    let keeper = tabs.find(tab => tab.url === keeperUrl && !tab.pendingUrl);
+    if (!keeper) keeper = await chrome.tabs.create({url: keeperUrl, active: false});
+    // Verify a surviving tab before touching the others; never close the last one.
+    await chrome.tabs.get(keeper.id);
+    const others = tabs.filter(tab => tab.id !== keeper.id);
+    for (let index = 0; index < others.length; index += 20) {
+      await chrome.tabs.get(keeper.id);
+      await Promise.allSettled(others.slice(index, index + 20).map(tab => chrome.tabs.remove(tab.id)));
+    }
+    tabs = await chrome.tabs.query({});
+    if (!tabs.some(tab => tab.id === keeper.id) || tabs.some(tab => tab.id !== keeper.id)) {
+      throw new Error('Очистка вкладок не завершилась. Проверки остаются на паузе, попытка повторится');
+    }
+    if (chrome.declarativeNetRequest) {
+      const rules = await chrome.declarativeNetRequest.getSessionRules();
+      if (rules.length) await chrome.declarativeNetRequest.updateSessionRules({removeRuleIds: rules.map(rule => rule.id)});
+    }
+    const saved = await chrome.storage.session.get(null);
+    const keys = Object.keys(saved).filter(key => /^(?:check_tab_\d+|tab_(?:wb|ozon)_\d+|ownedTabs|owned)$/.test(key));
+    if (keys.length) await chrome.storage.session.remove(keys);
+    await chrome.storage.local.set({cleanupRequested: false, cleanupNextAt: Date.now() + CLEANUP_INTERVAL, lastCleanup: Date.now(), lastCleanupClosed: others.length});
+    await showStatus(`Очистка завершена: закрыто вкладок ${others.length}. Проверки продолжатся автоматически, если мониторинг включён`);
+    return true;
+  } catch (error) {
+    await showStatus(`Очистка отложена: ${error.message || 'браузер не ответил'}. Новые проверки остаются на паузе`);
+    return true;
+  } finally { cleaning = false; }
+}
 async function openJob(job, slot, deadline) {
+  const epoch = cleanupEpoch;
   const tab = await chrome.tabs.create({url: job.url, active: false});
   const owned = {id: tab.id, url: job.url, key: `check_tab_${tab.id}`};
-  if (Date.now() >= deadline) {
-    await closeOwned(owned);
+  if (Date.now() >= deadline || epoch !== cleanupEpoch) {
+    await closeOwned(owned, undefined, epoch !== cleanupEpoch);
     throw new Error('Время проверки истекло');
   }
   liveTabs.set(slot, owned);
   const stillLive = async () => {
-    if (liveTabs.get(slot) === owned && Date.now() < deadline) return;
-    await closeOwned(owned, owned.key);
+    if (liveTabs.get(slot) === owned && Date.now() < deadline && epoch === cleanupEpoch) return;
+    await closeOwned(owned, owned.key, epoch !== cleanupEpoch);
     throw new Error('Время проверки истекло');
   };
   await chrome.storage.session.set({[owned.key]: owned, owned});
@@ -211,8 +265,9 @@ async function tick() {
   if (pumping) return;
   pumping = true;
   try {
-    const config = await chrome.storage.local.get(['enabled', 'client']);
+    const config = await chrome.storage.local.get(['enabled', 'client', 'autoCleanup', 'cleanupNextAt', 'cleanupRequested']);
     if (!config.enabled) return;
+    if (await cleanupBrowser(config)) return;
     await cleanupTabs();
     const client = config.client || crypto.randomUUID();
     if (!config.client) await chrome.storage.local.set({client});
@@ -224,7 +279,7 @@ async function tick() {
       if (active.has(slot)) continue;
       const task = runSlot(slot, client);
       active.set(slot, task);
-      task.then(refill => { active.delete(slot); if (refill) schedule(0); }, () => { active.delete(slot); });
+      task.then(refill => { active.delete(slot); if (refill && !cleaning) schedule(0); }, () => { active.delete(slot); });
     }
   } catch (e) { await showStatus(e.message || 'Нет связи с PaintWatch'); }
   finally { pumping = false; schedule(); }
@@ -246,8 +301,21 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     return true;
   }
   if (message.type === 'paintwatch.tick') { tick(); reply({ok: true}); }
+  if (message.type === 'paintwatch.cleanup') {
+    chrome.storage.local.get('enabled').then(async config => {
+      if (!config.enabled) { reply({error: 'Сначала подключите расширение к PaintWatch'}); return; }
+      await chrome.storage.local.set({cleanupRequested: true});
+      reply({ok: true});
+      tick();
+    }).catch(() => reply({error: 'Не удалось запустить очистку вкладок'}));
+    return true;
+  }
   if (message.type === 'paintwatch.open') {
-    chrome.storage.session.get('owned').then(({owned}) => { if (owned?.url) chrome.tabs.create({url: owned.url, active: true}); });
-    reply({ok: true});
+    chrome.storage.session.get('owned').then(({owned}) => {
+      if (cleaning) { reply({error: 'Дождитесь завершения очистки вкладок'}); return; }
+      if (owned?.url) chrome.tabs.create({url: owned.url, active: true});
+      reply({ok: true});
+    }).catch(() => reply({error: 'Не удалось открыть карточку'}));
+    return true;
   }
 });

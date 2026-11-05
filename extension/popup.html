@@ -5,9 +5,12 @@
 <label for="key">Код подключения из настроек приложения</label>
 <input id="key" type="password" autocomplete="off">
 <label style="display:block;margin:8px 0"><input id="lightweight" type="checkbox" style="width:auto;margin:0 6px 0 0">Не загружать фото и видео при проверках</label>
+<label style="display:block;margin:8px 0"><input id="autoCleanup" type="checkbox" style="width:auto;margin:0 6px 0 0">Раз в 30 минут закрывать все вкладки, кроме одной</label>
+<small>Закрываются и личные вкладки этого профиля. На время очистки проверки приостанавливаются.</small>
 <button id="connect">Подключить</button>
 <button id="check">Проверить сейчас</button>
 <button id="open">Открыть проверяемую карточку</button>
+<button id="cleanup">Очистить вкладки сейчас</button>
 <button id="diagnose">Диагностика цены открытой карточки</button>
 <textarea id="report" hidden readonly rows="12" style="box-sizing:border-box;width:100%" aria-label="Отчёт распознавания цены"></textarea>
 <p id="status">Подключите расширение к PaintWatch</p>
