@@ -72,25 +72,98 @@
     return false;
   }
   const WB_CARD = '.mo-typography_colors_danger, .mo-typography_color_danger, .mo-typography_colors_accent';
+  const WB_WALLET = '[class*="priceBlockWalletPrice"], .price-block__wallet-price';
+  const walletLabel = text => /(?<![\p{L}\p{N}])(?:с\s*|при\s+оплате\s+(?:с\s+)?)(?:(?:wb|вб)\s*)?кошельком(?=\s|$|[.,:]|\d)/iu.test(String(text).replace(/\s+/gu, ' ').trim());
+  const withoutWallet = text => /без\s*(?:(?:wb|вб)\s*)?кошелька/iu.test(text);
   function cardAmount(text) {
     const normalized = String(text).replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
     const match = normalized.match(/^(\d[\d\s]*(?:[.,]\d{1,2})?)\s*(?:₽|руб\.?)$/u);
     return match ? money(match[1]) : null;
   }
+  function walletAmount(text) {
+    const value = String(text).replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\s+/gu, ' ').trim();
+    const labels = [...value.matchAll(/(?<![\p{L}\p{N}])(?:с\s*|при\s+оплате\s+(?:с\s+)?)(?:(?:wb|вб)\s*)?кошельком(?=\s|$|[.,:]|\d)/giu)];
+    if (labels.length !== 1) return null;
+    const label = labels[0];
+    return cardAmount((value.slice(0, label.index) + value.slice(label.index + label[0].length)).replace(/^\s*:\s*|\s*:\s*$/gu, '').trim());
+  }
   function walletNodes(doc) {
     return [...doc.querySelectorAll(WB_CARD)];
   }
-  function wbPriceValues(doc) {
-    const found = new Set();
-    for (const node of walletNodes(doc)) {
-      const price = cardAmount(node.innerText || '');
-      if (price !== null && rendered(node) && !struck(node, doc.documentElement)) found.add(price);
+  function otherWbProduct(node, current) {
+    if (node.closest('.product-card, .j-card-item')) return true;
+    const identified = node.closest('[data-nm-id], [data-product-id]');
+    const article = identified?.getAttribute('data-nm-id') || identified?.getAttribute('data-product-id');
+    if (/^\d+$/.test(article || '') && current.article && article !== current.article) return true;
+    for (let parent = node; parent; parent = parent.parentElement) {
+      if (parent.matches('a[href]') && /\/catalog\/\d+\/detail\.aspx(?:[/?#]|$)/i.test(parent.getAttribute('href') || '')) return true;
     }
+    return false;
+  }
+  function nonWalletPrice(node, root) {
+    for (let depth = 0; node && depth < 3 && root.contains(node); depth++, node = node.parentElement) {
+      if (node.matches('body, html, main')) break;
+      const text = node.innerText || '';
+      if (text.length > 500) break;
+      if (/скидк|к[еэ]шб[еэ]к|верн[её]м|балл|рассрочк|частями|в\s+месяц/iu.test(text)) return true;
+      if (walletLabel(text)) break;
+      if (withoutWallet(text)) return true;
+    }
+    return false;
+  }
+  function walletAmounts(root, current) {
+    const found = new Set();
+    const accept = (node, price) => {
+      if (price !== null && !otherWbProduct(node, current) && rendered(node) && !struck(node, root) && !hasStruckDigits(node, root) && !nonWalletPrice(node, root)) found.add(price);
+    };
+    for (const node of [root, ...root.querySelectorAll('*')]) {
+      const value = node.innerText || '';
+      accept(node, cardAmount(value) ?? walletAmount(value));
+    }
+    // A price can be a bare text node next to a nested payment label.
+    const walker = root.ownerDocument.createTreeWalker(root, 4);
+    let text;
+    while ((text = walker.nextNode())) accept(text.parentElement, cardAmount(text.textContent || '') ?? walletAmount(text.textContent || ''));
     return found;
   }
-  function wbWalletPrice(doc) {
-    const found = wbPriceValues(doc);
-    return found.size === 1 ? [...found][0] : null;
+  function hasStruckDigits(node, root) {
+    return [...node.querySelectorAll('*')].some(child => /\d/.test(child.innerText || '') && struck(child, root));
+  }
+  function wbPriceRead(doc, current) {
+    const containers = [...doc.querySelectorAll(WB_WALLET)].filter(node =>
+      !otherWbProduct(node, current) && (node.classList.contains('price-block__wallet-price') ||
+        [...node.classList].some(name => /^priceBlockWalletPrice(?:-|$)/.test(name))));
+    if (containers.length) {
+      const prices = new Set(containers.flatMap(node => [...walletAmounts(node, current)]));
+      return {source: 'wallet_container', prices, roots: containers.length};
+    }
+    const labels = new Set();
+    const walker = doc.createTreeWalker(doc.body || doc.documentElement, 4);
+    let text;
+    while ((text = walker.nextNode())) {
+      if (!/кошель/iu.test(text.textContent || '')) continue;
+      let node = text.parentElement;
+      if (!node || node.closest('header, nav, footer, script, style') || otherWbProduct(node, current)) continue;
+      for (let depth = 0; node && depth < 5 && !node.matches('body, html, main'); depth++, node = node.parentElement) {
+        const value = node.innerText || '';
+        if (value.length > 500) break;
+        if (withoutWallet(value) && !walletLabel(value)) break;
+        if (!walletLabel(value) || !rendered(node) || struck(node, doc.documentElement)) continue;
+        labels.add(node);
+        if (walletAmounts(node, current).size) break;
+      }
+    }
+    if (labels.size) {
+      const prices = new Set([...labels].flatMap(node => [...walletAmounts(node, current)]));
+      return {source: 'wallet_label', prices, roots: labels.size};
+    }
+    const prices = new Set();
+    for (const node of walletNodes(doc)) {
+      if (node.closest('header, nav, footer')) continue;
+      const price = cardAmount(node.innerText || '');
+      if (price !== null && !otherWbProduct(node, current) && rendered(node) && !struck(node, doc.documentElement) && !hasStruckDigits(node, doc.documentElement) && !nonWalletPrice(node, doc.documentElement)) prices.add(price);
+    }
+    return {source: 'legacy_color', prices, roots: 0};
   }
   function labelledPrice(root, label) {
     if (!root) return null;
@@ -111,9 +184,10 @@
     }
     return found.size === 1 ? [...found][0] : null;
   }
-  function wbSeller(doc) {
+  function wbSeller(doc, current) {
     const sellers = new Set();
     for (const node of doc.querySelectorAll('a[href*="/seller/"]')) {
+      if (otherWbProduct(node, current)) continue;
       try {
         const link = new URL(node.href);
         const id = link.pathname.match(/^\/seller\/(\d+)\/?$/)?.[1];
@@ -157,16 +231,18 @@
         return {kind: 'visible', name: title, price, currency: 'RUB', price_kind: 'ozon_card', seller};
       }
     } else {
-      const price = wbWalletPrice(doc);
+      const wallet = wbPriceRead(doc, current);
+      const price = wallet.prices.size === 1 ? [...wallet.prices][0] : null;
       const name = title || (/^\d+$/.test(current.article || '') ? current.article : '');
-      if (price !== null && name) return {kind: 'visible', name, name_source: title ? 'heading' : 'article', price, currency: 'RUB', price_kind: 'wb_wallet', seller: wbSeller(doc)};
+      if (price !== null && name) return {kind: 'visible', name, name_source: title ? 'heading' : 'article', price, currency: 'RUB', price_kind: 'wb_wallet', seller: wbSeller(doc, current)};
     }
     return null;
   }
   function diagnose(doc, current) {
     const matched = soldOut(doc, current) || visible(doc, current);
     const titleFound = Boolean(doc.querySelector('h1')?.innerText?.trim());
-    const cardPrices = current.market === 'wb' ? [...wbPriceValues(doc)] : [];
+    const wallet = current.market === 'wb' ? wbPriceRead(doc, current) : null;
+    const cardPrices = wallet ? [...wallet.prices] : [];
     const reason = matched ? null : current.market === 'wb'
       ? cardPrices.length > 1 ? 'На странице разные подтверждённые цены по WB Карте' : 'Цена по WB Карте не подтверждена'
       : !titleFound ? 'Не найден заголовок карточки Ozon' : 'Цена по Ozon Карте не подтверждена';
@@ -176,6 +252,7 @@
     const selector = current.market === 'wb' ? WB_CARD : '[data-widget="webPrice"]';
     return {report_version: 1, market: current.market, article: current.article, variant: current.variant,
       price_kind: current.market === 'wb' ? 'wb_wallet' : 'ozon_card',
+      ...(wallet ? {walletEvidence: {source: wallet.source, roots: wallet.roots, prices: cardPrices}} : {}),
       walletNodes: current.market === 'wb' ? walletNodes(doc).slice(0, 20).map(node => ({
         tag: node.tagName, className: String(node.className).slice(0, 300), prices: amounts(node.innerText || ''),
         visible: rendered(node), struck: struck(node, doc.documentElement), parsedPrice: cardAmount(node.innerText || '')
@@ -192,7 +269,7 @@
         }))
       }))};
   }
-  const api = {ref, money, amounts, cardAmount, cleanOzon, cleanWb, visible, soldOut, diagnose};
+  const api = {ref, money, amounts, cardAmount, walletAmount, cleanOzon, cleanWb, visible, soldOut, diagnose};
   globalThis.PaintWatchExtract = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

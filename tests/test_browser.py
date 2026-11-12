@@ -20,6 +20,123 @@ from paintwatch.store import Store
     "Set PAINTWATCH_TEST_BROWSER for Chromium fixture integration",
 )
 class BrowserSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wb_wallet_sources_survive_new_styles_and_ignore_other_product_cards(
+        self,
+    ):
+        script = str(
+            Path(__file__).resolve().parent.parent / "extension" / "extractor.js"
+        )
+        fixtures = [
+            '<button class="priceBlockWalletPrice-new"><b class="new-style">278 ₽</b><span>с WB Кошельком</span></button>',
+            "<section><div><b>278 ₽</b><span>с <i>WB</i> Кошельком</span></div><div>300 ₽ без WB Кошелька</div></section>",
+            '<h2 class="mo-typography_colors_accent">278 ₽</h2>',
+            '<section><h2 class="mo-typography_colors_accent">278 ₽</h2></section><p>Скидка на другие товары</p>',
+        ]
+        for markup in fixtures:
+            with self.subTest(markup=markup):
+                await self.page.set_content(
+                    "<h1>Краска</h1>"
+                    + markup
+                    + '<a href="https://www.wildberries.ru/catalog/999/detail.aspx"><span class="mo-typography_colors_accent">12 ₽</span><span>с WB Кошельком</span></a>'
+                    + '<article class="product-card" data-nm-id="888"><span class="mo-typography_colors_danger">15 ₽</span></article>'
+                )
+                await self.page.add_script_tag(path=script)
+                result = await self.page.evaluate(
+                    'PaintWatchExtract.visible(document,{market:"wb",article:"708052242",variant:""})'
+                )
+                self.assertIsNotNone(result)
+                self.assertEqual(result["price"], 27800)
+                self.assertEqual(result["price_kind"], "wb_wallet")
+
+    async def test_wb_wallet_evidence_rejects_hidden_discounts_regular_prices_and_conflicts(
+        self,
+    ):
+        script = str(
+            Path(__file__).resolve().parent.parent / "extension" / "extractor.js"
+        )
+        invalid = [
+            '<div class="priceBlockWalletPrice-v2" style="display:none">278 ₽</div><span class="mo-typography_colors_accent">300 ₽</span>',
+            '<div class="priceBlockWalletPrice-v2"><s>278 ₽</s></div><span class="mo-typography_colors_accent">300 ₽</span>',
+            '<div class="mo-typography_colors_accent"><s>278 ₽</s></div>',
+            '<div class="priceBlockWalletPrice-v2"><b>278 ₽</b><b>279 ₽</b></div>',
+            "<div><b>278 ₽</b> с WB Кошельком</div><div><b>279 ₽</b> с WB Кошельком</div>",
+            '<div><span class="mo-typography_colors_accent">300 ₽</span> без WB Кошелька</div>',
+            '<div class="priceBlockWalletPrice-v2">Скидка <span>15 ₽</span> с WB Кошельком</div>',
+            "<div>Скидка <span>15 ₽</span> с WB Кошельком</div>",
+            "<header>Баланс WB Кошелька: 500 ₽</header><div>300 ₽</div>",
+            '<header>Баланс WB Кошелька: <b class="mo-typography_colors_accent">500 ₽</b></header><div>300 ₽</div>',
+            '<article class="product-card"><div><b>15 ₽</b> с WB Кошельком</div></article>',
+        ]
+        for markup in invalid:
+            with self.subTest(markup=markup):
+                await self.page.set_content("<h1>Краска</h1>" + markup)
+                await self.page.add_script_tag(path=script)
+                result = await self.page.evaluate(
+                    'PaintWatchExtract.visible(document,{market:"wb",article:"708052242",variant:""})'
+                )
+                self.assertIsNone(result)
+        for markup in [
+            '<div class="price-block__wallet-price"><span>278</span><span> ₽</span></div>',
+            "<div>278 ₽ с WB Кошельком</div>",
+            "<div><span>278 ₽</span><span>с</span><b>WB</b><span>Кошельком</span></div>",
+            "<section><div>278 ₽ с WB Кошельком</div><div>300 ₽ без WB Кошелька</div><span>400 ₽</span></section>",
+        ]:
+            with self.subTest(markup=markup):
+                await self.page.set_content("<h1>Краска</h1>" + markup)
+                await self.page.add_script_tag(path=script)
+                result = await self.page.evaluate(
+                    'PaintWatchExtract.diagnose(document,{market:"wb",article:"708052242",variant:""})'
+                )
+                self.assertEqual(result["matched"]["price"], 27800)
+                self.assertIn(
+                    result["walletEvidence"]["source"],
+                    ("wallet_container", "wallet_label"),
+                )
+
+    async def test_wb_new_wallet_source_and_main_seller_reach_store_without_api(self):
+        ref = parse_ref("708052242", "wb")
+        requests = []
+
+        async def route(request_route):
+            requests.append(request_route.request.url)
+            await request_route.fulfill(
+                status=200,
+                content_type="text/html; charset=utf-8",
+                body=(
+                    '<html><body><h1>Краска</h1><button class="priceBlockWalletPrice-new"><b>278 ₽</b><span>с WB Кошельком</span></button>'
+                    '<a href="https://www.wildberries.ru/seller/111">Продавец</a>'
+                    '<article class="product-card" data-nm-id="999"><span class="mo-typography_colors_accent">12 ₽</span><a href="https://www.wildberries.ru/seller/222">Другой продавец</a></article></body></html>'
+                ),
+            )
+
+        await self.page.route("**/*", route)
+        await self.page.goto(ref.url, wait_until="domcontentloaded")
+        await self.page.evaluate(
+            "window.chrome={runtime:{onMessage:{addListener:fn=>window.collectListener=fn}}}"
+        )
+        folder = Path(__file__).resolve().parent.parent / "extension"
+        await self.page.add_script_tag(path=str(folder / "extractor.js"))
+        await self.page.add_script_tag(path=str(folder / "content.js"))
+        self.store.add([ref], "", "#arton")
+        pid = self.store.products()[0]["id"]
+        with self.store.db() as db:
+            db.execute("UPDATE products SET seller='111' WHERE id=?", (pid,))
+        self.store.configure({"monitoring": 1})
+        bridge = BrowserBridge(self.store, "fixture")
+        job = bridge.job()
+        result = await self.page.evaluate(
+            """job => new Promise(resolve => collectListener({type:'paintwatch.collect',
+            job:{...job,deadline:Date.now()+3000}}, {}, resolve))""",
+            job,
+        )
+        self.assertEqual(result["price"], 27800)
+        self.assertEqual(result["seller"], "111")
+        bridge.result({**result, "id": job["id"], "lease": job["lease"]})
+        self.assertEqual(self.store.product(pid)["price"], 27800)
+        self.assertEqual(self.store.product(pid)["seller"], "111")
+        self.assertEqual(self.store.product(pid)["failures"], 0)
+        self.assertEqual(len(requests), 1)
+
     async def test_wb_color_price_can_have_nested_payment_labels(self):
         await self.page.set_content(
             '<h1>Краска</h1><div class="price-block"><div><span class="mo-typography_colors_danger">350 ₽</span><span>с <b>WB</b> Кошельком</span></div><div><span>380 ₽</span><span>без <b>WB</b> Кошелька</span></div></div>'

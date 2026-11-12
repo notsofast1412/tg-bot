@@ -47,3 +47,11 @@ test('card amount accepts only a complete ruble price rather than a discount or 
     assert.equal(parser.cardAmount(text), null, text);
   }
 });
+test('explicit wallet amount accepts a payment label on either side without inventing a discount', () => {
+  for (const text of ['278 ₽ с WB Кошельком', 'с WB Кошельком: 278 ₽', '278 ₽ при оплате WB Кошельком', '1\u202f234,56 ₽ с Кошельком']) {
+    assert.equal(parser.walletAmount(text), text.startsWith('1') ? 123456 : 27800, text);
+  }
+  for (const text of ['278 ₽ без WB Кошелька', 'Скидка 15 ₽ с WB Кошельком', '-15 ₽ с WB Кошельком', 'с WB Кошельком: -15 ₽', '278 ₽ с WB Кошельком 300 ₽', 'WB Кошелёк 500 ₽', '278 ₽']) {
+    assert.equal(parser.walletAmount(text), null, text);
+  }
+});
