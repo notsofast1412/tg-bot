@@ -77,6 +77,24 @@ class Store:
                     product_id INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
                     request TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS telegram_members(
+                    bot TEXT NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,
+                    username TEXT NOT NULL,active INTEGER NOT NULL,
+                    PRIMARY KEY(bot,chat_id,user_id)
+                );
+                CREATE TABLE IF NOT EXISTS telegram_mention_jobs(
+                    bot TEXT NOT NULL,chat_id INTEGER NOT NULL,requester INTEGER NOT NULL,
+                    state TEXT NOT NULL,next_try REAL NOT NULL DEFAULT 0,
+                    sent INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY(bot,chat_id)
+                );
+                CREATE TABLE IF NOT EXISTS telegram_mention_targets(
+                    bot TEXT NOT NULL,chat_id INTEGER NOT NULL,user_id INTEGER NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'pending',
+                    PRIMARY KEY(bot,chat_id,user_id),
+                    FOREIGN KEY(bot,chat_id) REFERENCES telegram_mention_jobs(bot,chat_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS telegram_mention_pending ON telegram_mention_targets(bot,chat_id,state,user_id);
             """)
             db.execute("BEGIN IMMEDIATE")
             if version in (1, 2, 3):

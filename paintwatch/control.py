@@ -7,6 +7,7 @@ import time
 
 from .add_dialog import AddDialog, CANCEL
 from .domain import money, rub
+from .mentions import ALLOWED_UPDATES, GROUP_COMMANDS, GroupMentions
 from .telegram import Telegram, TelegramError
 
 
@@ -31,7 +32,7 @@ KEYBOARD = {
     "is_persistent": True,
     "input_field_placeholder": "Выберите действие или введите команду",
 }
-MENU_VERSION = "0.4.6"
+MENU_VERSION = "0.4.10"
 COMMANDS = [
     {"command": command, "description": description}
     for command, description in (
@@ -54,6 +55,9 @@ COMMANDS = [
         ("check", "Запросить проверку по интервалу"),
         ("verified", "Повторить после ручной проверки доступа"),
         ("errors", "Текущие проблемы"),
+        ("tagall", "Упомянуть участников настроенной группы"),
+        ("tagall_status", "Состояние упоминаний в группе"),
+        ("tagall_cancel", "Остановить упоминания в группе"),
         ("id", "Мой Telegram ID"),
         ("help", "Команды и правила уведомлений"),
     )
@@ -80,6 +84,9 @@ HELP = """PaintWatch — управление
 /parallel ЧИСЛО — 1–32 одновременные проверки
 /threshold ID РУБЛИ — индивидуальный порог
 /errors — последние проблемы
+/tagall — упомянуть известных участников группы по username
+/tagall_status /tagall_cancel — состояние / остановка упоминаний
+В группе /tagall доступна админам; /here добавляет участника в список.
 /help — эта справка
 
 Повторное ценовое уведомление — при снижении ещё минимум на 15 ₽ от последнего отправленного.
@@ -92,6 +99,17 @@ class TelegramControl:
         self.store, self.vault, self.bridge = store, vault, bridge
         self.started = time.time()
         self.menu_retry_at = 0
+        self.group = None
+
+    def group_mentions(self, fingerprint):
+        chat = GroupMentions.parse_chat(self.store.setting("chat_id"))
+        if (
+            self.group is None
+            or self.group.bot != fingerprint
+            or self.group.chat_id() != chat
+        ):
+            self.group = GroupMentions(self.store, fingerprint)
+        return self.group
 
     def owner(self):
         value = self.store.setting("owner_id")
@@ -304,7 +322,7 @@ class TelegramControl:
                     "offset": -1,
                     "limit": 1,
                     "timeout": 0,
-                    "allowed_updates": ["message"],
+                    "allowed_updates": ALLOWED_UPDATES,
                 },
             )
             offset = str(max((u["update_id"] + 1 for u in old), default=0))
@@ -316,7 +334,7 @@ class TelegramControl:
                 "offset": int(offset),
                 "limit": 20,
                 "timeout": 0,
-                "allowed_updates": ["message"],
+                "allowed_updates": ALLOWED_UPDATES,
             },
         )
         for update in updates:
@@ -324,7 +342,11 @@ class TelegramControl:
                 continue
             # Persist before applying commands: a restart never repeats a deletion/addition.
             self.store.configure({key: update["update_id"] + 1})
+            group = self.group_mentions(fingerprint)
+            group.observe(update)
             message = update.get("message", {})
+            if await group.handle(api, message):
+                continue
             sender, chat = message.get("from", {}), message.get("chat", {})
             uid = sender.get("id")
             if (
@@ -381,6 +403,25 @@ class TelegramControl:
             reply_markup=dialog.markup() or KEYBOARD,
         )
 
+    async def refresh_group_menu(self, api, fingerprint):
+        chat = self.group_mentions(fingerprint).chat_id()
+        if chat is None:
+            return
+        key = "telegram_group_menu_" + fingerprint
+        signature = f"{MENU_VERSION}:{chat}"
+        if self.store.setting(key) == signature:
+            return
+        for language in ("", "ru"):
+            await api.call(
+                "setMyCommands",
+                {
+                    "commands": GROUP_COMMANDS,
+                    "scope": {"type": "chat", "chat_id": chat},
+                    "language_code": language,
+                },
+            )
+        self.store.configure({key: signature})
+
     async def alert(self, api):
         owner = self.owner()
         if not owner:
@@ -431,14 +472,16 @@ class TelegramControl:
                     if current != fingerprint:
                         if api:
                             await api.close()
-                        api = Telegram(token) if token else None
+                        api = Telegram(token, store=self.store) if token else None
                         fingerprint = current
                     if api:
                         await self.poll(api, fingerprint)
                         await self.alert(api)
+                        await self.group_mentions(fingerprint).deliver(api)
                         if time.time() >= self.menu_retry_at:
                             try:
                                 await self.refresh_menu(api, fingerprint)
+                                await self.refresh_group_menu(api, fingerprint)
                             except TelegramError as error:
                                 self.menu_retry_at = time.time() + error.delay
                                 self.store.configure(

@@ -15,9 +15,9 @@ TOKEN = "123456789:" + "A" * 35
 
 
 class TelegramTests(unittest.IsolatedAsyncioTestCase):
-    def api(self, handler):
+    def api(self, handler, **kwargs):
         return Telegram(
-            TOKEN, httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            TOKEN, httpx.AsyncClient(transport=httpx.MockTransport(handler)), **kwargs
         )
 
     async def test_lost_send_response_is_uncertain_and_redacted(self):
@@ -84,7 +84,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch(
                     "paintwatch.telegram.Telegram",
-                    side_effect=lambda token: self.api(handler),
+                    side_effect=lambda token, **kwargs: self.api(handler, **kwargs),
                 ),
                 patch("asyncio.sleep", new=AsyncMock()),
             ):
@@ -147,7 +147,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch(
                     "paintwatch.telegram.Telegram",
-                    side_effect=lambda token: self.api(handler),
+                    side_effect=lambda token, **kwargs: self.api(handler, **kwargs),
                 ),
                 patch("asyncio.sleep", new=AsyncMock()),
                 patch("time.time", return_value=now),
@@ -164,7 +164,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch(
                     "paintwatch.telegram.Telegram",
-                    side_effect=lambda token: self.api(handler),
+                    side_effect=lambda token, **kwargs: self.api(handler, **kwargs),
                 ),
                 patch("asyncio.sleep", new=AsyncMock()),
                 patch("time.time", return_value=now + 74),
@@ -216,8 +216,8 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
                     sent.append(json.loads(request.content))
                 return httpx.Response(200, json={"ok": True, "result": {"id": 1}})
 
-            def factory(token):
-                return self.api(handler)
+            def factory(token, **kwargs):
+                return self.api(handler, **kwargs)
 
             with patch("paintwatch.telegram.Telegram", side_effect=factory):
                 await deliver(store, vault)
@@ -248,7 +248,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
 
             with patch(
                 "paintwatch.telegram.Telegram",
-                side_effect=lambda token: self.api(handler),
+                side_effect=lambda token, **kwargs: self.api(handler, **kwargs),
             ):
                 await deliver(store, vault)
             self.assertEqual(len(sends), 1)
@@ -266,8 +266,8 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             vault.save(TOKEN)
             with patch(
                 "paintwatch.telegram.Telegram",
-                side_effect=lambda token: self.api(
-                    lambda r: self.fail("Stale data must not be sent")
+                side_effect=lambda token, **kwargs: self.api(
+                    lambda r: self.fail("Stale data must not be sent"), **kwargs
                 ),
             ):
                 await deliver(store, vault)
@@ -292,7 +292,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
 
             with patch(
                 "paintwatch.telegram.Telegram",
-                side_effect=lambda token: self.api(handler),
+                side_effect=lambda token, **kwargs: self.api(handler, **kwargs),
             ):
                 await deliver(store, vault)
             self.assertEqual(store.queue()[0]["state"], "cancelled")
@@ -313,8 +313,8 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
             vault.save(TOKEN)
             with patch(
                 "paintwatch.telegram.Telegram",
-                side_effect=lambda token: self.api(
-                    lambda r: self.fail("Failed check must prevent delivery")
+                side_effect=lambda token, **kwargs: self.api(
+                    lambda r: self.fail("Failed check must prevent delivery"), **kwargs
                 ),
             ):
                 await deliver(store, vault)
@@ -339,7 +339,7 @@ class TelegramTests(unittest.IsolatedAsyncioTestCase):
 
             with patch(
                 "paintwatch.telegram.Telegram",
-                side_effect=lambda token: self.api(handler),
+                side_effect=lambda token, **kwargs: self.api(handler, **kwargs),
             ):
                 await deliver(store, vault)
                 store.recover()

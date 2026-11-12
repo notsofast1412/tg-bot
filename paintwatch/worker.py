@@ -68,7 +68,7 @@ class Worker:
             chat_id = self.store.setting("chat_id")
             if not token or not chat_id:
                 raise ValueError("Сохраните токен и ID группы в настройках")
-            api = Telegram(token)
+            api = Telegram(token, store=self.store)
             try:
                 result = await api.diagnose(chat_id)
                 if command == "test":

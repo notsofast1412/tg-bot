@@ -1,3 +1,5 @@
+import asyncio
+import hashlib
 import re
 import time
 import httpx
@@ -13,10 +15,11 @@ class TelegramError(Exception):
 
 
 class Telegram:
-    def __init__(self, token, client=None):
+    def __init__(self, token, client=None, *, store=None):
         if not re.fullmatch(r"\d{5,15}:[A-Za-z0-9_-]{25,}", token):
             raise ValueError("Токен бота имеет неверный формат")
         self.token = token
+        self.store = store
         self.client = client or httpx.AsyncClient(timeout=20)
 
     async def call(self, method, params=None):
@@ -62,6 +65,22 @@ class Telegram:
         return f"Связь проверена: @{me.get('username', 'бот')}, группа «{chat.get('title', '')}»"
 
     async def send(self, chat_id, text, reply_markup=None):
+        if self.store is not None and re.fullmatch(r"-\d+", str(chat_id)):
+            fingerprint = hashlib.sha256(self.token.encode()).hexdigest()[:16]
+            key = f"telegram_group_send_{fingerprint}_{chat_id}"
+            now = time.time()
+            with self.store.db() as db:
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(
+                    "SELECT value FROM settings WHERE key=?", (key,)
+                ).fetchone()
+                when = max(now, float(row[0]) if row else now)
+                db.execute(
+                    "INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, str(when + 3.2)),
+                )
+            if when > now:
+                await asyncio.sleep(when - now)
         return await self.call(
             "sendMessage",
             {
@@ -100,7 +119,7 @@ async def deliver(store, vault):
         token = vault.read()
         if not token:
             return
-        api = Telegram(token)
+        api = Telegram(token, store=store)
     except (ValueError, RuntimeError):
         return
     try:
