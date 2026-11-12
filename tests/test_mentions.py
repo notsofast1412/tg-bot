@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -5,7 +6,12 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from paintwatch.control import TelegramControl
-from paintwatch.mentions import ALLOWED_UPDATES, GROUP_COMMANDS, GroupMentions
+from paintwatch.mentions import (
+    ALLOWED_UPDATES,
+    GROUP_COMMANDS,
+    GroupMentions,
+    mention_message,
+)
 from paintwatch.platform import SecretStore
 from paintwatch.store import Store
 from paintwatch.telegram import Telegram, TelegramError
@@ -180,7 +186,7 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
         await self.control.poll(self.api, "fixture")
         texts = [call.args[1] for call in self.api.send.call_args_list]
         self.assertIn("Добавлен @Member", texts)
-        self.assertTrue(any("нет username" in text for text in texts))
+        self.assertTrue(any("по Telegram ID" in text for text in texts))
         self.assertEqual(self.store.setting("monitoring", "0"), "0")
 
     async def test_admin_command_snapshots_members_and_batches_current_usernames_without_bots_or_leavers(
@@ -204,7 +210,14 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
         output = " ".join(self.sent())
         self.assertEqual(len(self.sent()), 3)
         self.assertEqual(output.count("@"), 10)
-        self.assertEqual(self.group.job()["sent"], 10)
+        self.assertEqual(self.group.job()["sent"], 11)
+        inline = [
+            entity
+            for call in self.api.send.call_args_list
+            for entity in call.kwargs.get("entities", [])
+            if entity["type"] == "text_mention"
+        ]
+        self.assertEqual([entity["user"]["id"] for entity in inline], [3])
         self.assertEqual(self.group.job()["state"], "completed")
         self.assertNotIn("@Left", output)
         self.assertNotIn("@Bot", output)
@@ -418,10 +431,83 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
     ):
         self.add(1, "name\n@outsider")
         await self.start()
-        self.assertIsNone(self.group.job())
+        self.assertIsNotNone(self.group.job())
         self.assertIn("/here", self.api.send.call_args.args[1])
+        await self.tick()
+        self.assertNotIn("@outsider", " ".join(self.sent()))
+        self.assertEqual(self.api.send.call_args.kwargs["entities"][0]["user"]["id"], 1)
         await self.group.handle(self.api, message("/tagall_status"))
         self.assertIn("полный список", self.api.send.call_args.args[1])
+
+    async def test_here_without_username_saves_id_and_tagall_mentions_that_member(self):
+        self.members[2] = {
+            "user": {**user(2), "first_name": "Анна", "last_name": "Тест"},
+            "status": "member",
+        }
+        self.updates = [
+            {"update_id": 1, "message": message("/here", uid=2, username="")}
+        ]
+        await self.control.poll(self.api, "fixture")
+        await self.start()
+        await self.tick()
+        self.assertEqual(self.sent(), ["📣 Участники чата:\nАнна Тест"])
+        entity = self.api.send.call_args.kwargs["entities"][0]
+        self.assertEqual(entity["type"], "text_mention")
+        self.assertEqual(entity["user"]["id"], 2)
+        self.assertEqual(self.group.job()["sent"], 1)
+
+    async def test_same_display_names_do_not_merge_different_ids_and_leavers_are_skipped(
+        self,
+    ):
+        for uid in (1, 2, 3):
+            self.add(uid, "")
+            self.members[uid]["user"]["first_name"] = "Алексей"
+        await self.start()
+        self.members[3]["status"] = "left"
+        await self.tick()
+        entities = self.api.send.call_args.kwargs["entities"]
+        self.assertEqual([entity["user"]["id"] for entity in entities], [1, 2])
+        self.assertEqual(self.group.job()["sent"], 2)
+
+    async def test_inline_mention_offsets_use_utf16_and_names_are_plain_text(self):
+        text, entities = mention_message(
+            [
+                {**user(1), "first_name": "Анна 🐈", "last_name": "<Тест>&"},
+                user(2, "Member"),
+                {**user(3), "first_name": "@outsider"},
+                {**user(4), "first_name": " \u200b "},
+            ]
+        )
+        encoded = text.encode("utf-16-le")
+        labels = [
+            encoded[e["offset"] * 2 : (e["offset"] + e["length"]) * 2].decode(
+                "utf-16-le"
+            )
+            for e in entities
+        ]
+        self.assertEqual(
+            labels, ["Анна 🐈 <Тест>&", "@Member", "＠outsider", "Участник"]
+        )
+        self.assertEqual(
+            [e["type"] for e in entities],
+            ["text_mention", "mention", "text_mention", "text_mention"],
+        )
+        sent = []
+
+        def response(request):
+            sent.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+        api = Telegram(
+            "123456789:" + "A" * 35,
+            httpx.AsyncClient(transport=httpx.MockTransport(response)),
+        )
+        try:
+            await api.send(-1001, text, entities=entities)
+        finally:
+            await api.close()
+        self.assertEqual(sent[0]["entities"], entities)
+        self.assertNotIn("parse_mode", sent[0])
 
     async def test_group_menu_contains_only_group_commands_and_is_published_once(self):
         await self.control.refresh_group_menu(self.api, "fixture")

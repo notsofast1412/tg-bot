@@ -1,4 +1,4 @@
-"""Known group members and restart-safe, explicit username mention commands."""
+"""Known group members and restart-safe mentions by username or Telegram ID."""
 
 import re
 import time
@@ -7,7 +7,7 @@ from .telegram import TelegramError
 
 
 GROUP_COMMANDS = [
-    {"command": "tagall", "description": "Упомянуть известных участников по username"},
+    {"command": "tagall", "description": "Упомянуть участников по username или ID"},
     {
         "command": "tagall_status",
         "description": "Список участников и состояние упоминаний",
@@ -16,6 +16,34 @@ GROUP_COMMANDS = [
     {"command": "here", "description": "Добавить себя в список упоминаний"},
 ]
 ALLOWED_UPDATES = ["message", "chat_member", "my_chat_member"]
+
+
+def mention_message(users):
+    text = "📣 Участники чата:\n"
+    entities = []
+    for user in users:
+        username = GroupMentions.username(user)
+        name = " ".join(str(user.get("first_name") or "").split())[:64]
+        if not any(char.isprintable() and not char.isspace() for char in name):
+            name = "Участник"
+        surname = " ".join(str(user.get("last_name") or "").split())[:64]
+        label = (
+            "@" + username
+            if username
+            else (name + " " + surname).strip().replace("@", "＠")[:96]
+        )
+        if entities:
+            text += " "
+        entity = {
+            "type": "mention" if username else "text_mention",
+            "offset": len(text.encode("utf-16-le")) // 2,
+            "length": len(label.encode("utf-16-le")) // 2,
+        }
+        if not username:
+            entity["user"] = {"id": user["id"], "is_bot": False, "first_name": name}
+        entities.append(entity)
+        text += label
+    return text, entities
 
 
 class GroupMentions:
@@ -186,7 +214,7 @@ class GroupMentions:
                     reply,
                     f"Добавлен @{name}"
                     if name
-                    else "У аккаунта нет username. Задайте его в Telegram и снова отправьте /here",
+                    else "Добавлен по Telegram ID. Упоминание будет по имени, username не нужен",
                 )
             return True
         if not anonymous and not await self.administrator(api, uid):
@@ -214,7 +242,7 @@ class GroupMentions:
             }
             await api.send(
                 reply,
-                f"Известно участников: {total}, с username: {names}.\nУпоминания: {states.get(job['state'], job['state']) if job else 'не запускались'}, отправлено имён: {job['sent'] if job else 0}.\n{job['error'] if job else ''}\nTelegram не отдаёт полный список группы. Молчаливым участникам нужно один раз отправить /here",
+                f"Известно участников: {total}, с username: {names}, по ID: {total - names}.\nУпоминания: {states.get(job['state'], job['state']) if job else 'не запускались'}, отправлено имён: {job['sent'] if job else 0}.\n{job['error'] if job else ''}\nTelegram не отдаёт полный список группы. Молчаливым участникам нужно один раз отправить /here",
             )
             return True
         if len(parts) != 1:
@@ -241,11 +269,11 @@ class GroupMentions:
                 answer = "Упоминания уже идут. /tagall_status — состояние, /tagall_cancel — остановить"
             else:
                 count = db.execute(
-                    "SELECT COUNT(*) FROM telegram_members WHERE bot=? AND chat_id=? AND active=1 AND username<>''",
+                    "SELECT COUNT(*) FROM telegram_members WHERE bot=? AND chat_id=? AND active=1",
                     (self.bot, self.chat_id()),
                 ).fetchone()[0]
                 if not count:
-                    answer = "Пока нет известных участников с username. Участникам нужно один раз отправить /here в группе"
+                    answer = "Пока нет известных участников. Нужно один раз отправить /here в группе — ID сохранится автоматически, username не обязателен"
                 else:
                     db.execute(
                         "DELETE FROM telegram_mention_jobs WHERE bot=? AND chat_id=?",
@@ -256,10 +284,10 @@ class GroupMentions:
                         (self.bot, self.chat_id(), uid),
                     )
                     db.execute(
-                        "INSERT INTO telegram_mention_targets(bot,chat_id,user_id) SELECT bot,chat_id,user_id FROM telegram_members WHERE bot=? AND chat_id=? AND active=1 AND username<>''",
+                        "INSERT INTO telegram_mention_targets(bot,chat_id,user_id) SELECT bot,chat_id,user_id FROM telegram_members WHERE bot=? AND chat_id=? AND active=1",
                         (self.bot, self.chat_id()),
                     )
-                    answer = f"Упомяну {count} известных боту участников по username. Молчаливым участникам нужно один раз отправить /here"
+                    answer = f"Упомяну {count} известных боту участников: по username, а без него — по имени через ID. Молчаливым участникам нужно один раз отправить /here"
         await api.send(reply, answer)
         return True
 
@@ -294,7 +322,7 @@ class GroupMentions:
             if not pending:
                 self.state("completed")
                 return
-            names = {}
+            recipients = {}
             for uid in pending:
                 member = await api.call(
                     "getChatMember", {"chat_id": chat, "user_id": uid}
@@ -304,22 +332,18 @@ class GroupMentions:
                 self.remember(member["user"], self.active(member))
                 user = member["user"]
                 name = self.username(user)
-                if self.active(member) and not user.get("is_bot") and name:
-                    names[name.casefold()] = name
+                if self.active(member) and not user.get("is_bot"):
+                    recipients[("name", name.casefold()) if name else ("id", uid)] = (
+                        user
+                    )
             if not self.configured():
                 self.state("cancelled", "Группа в настройках изменена")
                 return
-            if names:
+            if recipients:
                 self.state("sending")
                 try:
-                    await api.send(
-                        chat,
-                        "📣 Участники чата:\n"
-                        + " ".join(
-                            "@" + name
-                            for name in sorted(names.values(), key=str.casefold)
-                        ),
-                    )
+                    text, entities = mention_message(recipients.values())
+                    await api.send(chat, text, entities=entities)
                 except TelegramError as error:
                     self.state(
                         "uncertain" if error.uncertain else "active",
@@ -340,7 +364,7 @@ class GroupMentions:
                     "UPDATE telegram_mention_jobs SET state=?,sent=sent+?,next_try=?,error='' WHERE bot=? AND chat_id=?",
                     (
                         "active" if remaining else "completed",
-                        len(names),
+                        len(recipients),
                         time.time() + 4,
                         self.bot,
                         chat,

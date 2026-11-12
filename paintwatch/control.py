@@ -32,7 +32,7 @@ KEYBOARD = {
     "is_persistent": True,
     "input_field_placeholder": "Выберите действие или введите команду",
 }
-MENU_VERSION = "0.4.10"
+MENU_VERSION = "0.4.11"
 COMMANDS = [
     {"command": command, "description": description}
     for command, description in (
@@ -84,7 +84,7 @@ HELP = """PaintWatch — управление
 /parallel ЧИСЛО — 1–32 одновременные проверки
 /threshold ID РУБЛИ — индивидуальный порог
 /errors — последние проблемы
-/tagall — упомянуть известных участников группы по username
+/tagall — упомянуть известных участников по username или ID
 /tagall_status /tagall_cancel — состояние / остановка упоминаний
 В группе /tagall доступна админам; /here добавляет участника в список.
 /help — эта справка

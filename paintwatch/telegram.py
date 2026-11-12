@@ -64,7 +64,7 @@ class Telegram:
             raise TelegramError("Бот не может писать в выбранную группу")
         return f"Связь проверена: @{me.get('username', 'бот')}, группа «{chat.get('title', '')}»"
 
-    async def send(self, chat_id, text, reply_markup=None):
+    async def send(self, chat_id, text, reply_markup=None, *, entities=None):
         if self.store is not None and re.fullmatch(r"-\d+", str(chat_id)):
             fingerprint = hashlib.sha256(self.token.encode()).hexdigest()[:16]
             key = f"telegram_group_send_{fingerprint}_{chat_id}"
@@ -88,6 +88,7 @@ class Telegram:
                 "text": text[:4000],
                 "link_preview_options": {"is_disabled": True},
                 **({"reply_markup": reply_markup} if reply_markup is not None else {}),
+                **({"entities": entities} if entities is not None else {}),
             },
         )
 
