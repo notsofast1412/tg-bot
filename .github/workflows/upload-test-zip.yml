@@ -1,0 +1,23 @@
+name: Publish Ozon test ZIP
+on:
+  push:
+    branches: [ozon-obscura-test-0.4.11-download]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify and publish the ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          file=PaintWatch-Ozon-Test-0.4.11-obscura-0.2.7-win-x64.zip
+          cat archive-part-*.bin > "$file"
+          echo "7e2eb55339bd840bee43ba229fc4eac26fa4630cf068e09ae968af1f27b377d0  $file" | sha256sum -c -
+          gh release create ozon-obscura-test-0.4.11 "$file" \
+            --target 78ded3ca4ce5a330b4aa7268ae11c546398a467a \
+            --title "PaintWatch Ozon Test для Windows x64" \
+            --prerelease --latest=false --notes-file release-notes.md
